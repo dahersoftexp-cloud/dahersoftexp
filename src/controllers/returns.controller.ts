@@ -19,25 +19,74 @@ export interface ReturnRecord extends ReturnData {
   createdDate: string;
 }
 
-// ✅ helper لتطبيق التعديل على الكمية
+const toNumber = (value: unknown, fallback = 0) => {
+  const next = Number(value);
+  return Number.isFinite(next) ? next : fallback;
+};
+
+const findProductForReturn = async ({
+  db,
+  productCode,
+  productId,
+  warehouse,
+}: {
+  db: ReturnType<typeof getDatabase>;
+  productCode?: string;
+  productId?: string;
+  warehouse: string;
+}) => {
+  const warehouseKey = await resolveProductsWarehouseKey(warehouse);
+  const productsRef = ref(db, `products/${warehouseKey}`);
+  const productsSnap = await get(productsRef);
+
+  if (!productsSnap.exists()) {
+    return null;
+  }
+
+  const products = productsSnap.val() as Record<string, any>;
+  const productEntry = Object.entries(products).find(([key, product]) => (
+    key === productId ||
+    key === productCode ||
+    product?.id === productId ||
+    product?.id === productCode ||
+    product?.code === productCode
+  ));
+
+  if (!productEntry) {
+    return null;
+  }
+
+  const [productKey, product] = productEntry;
+  return {
+    warehouseKey,
+    productKey,
+    product: {
+      ...product,
+      id: product?.id || productKey,
+      code: product?.code || productCode || productKey,
+    },
+  };
+};
+
 function applyReturnToProduct(
   product: any,
   type: "sale-return" | "purchase-return",
   qty: number
 ) {
+  const currentQuantity = toNumber(product.quantity);
+
   if (type === "sale-return") {
-    product.quantity += qty;
+    product.quantity = currentQuantity + qty;
   } else if (type === "purchase-return") {
-    if (product.quantity < qty) {
-      throw new Error("❌ الكمية غير كافية في المخزون للإرجاع");
+    if (currentQuantity < qty) {
+      throw new Error("Insufficient product quantity for purchase return");
     }
-    product.quantity -= qty;
+    product.quantity = currentQuantity - qty;
   } else {
-    throw new Error("❌ نوع الإرجاع غير صحيح (sale-return | purchase-return)");
+    throw new Error("Invalid return type");
   }
 }
 
-// ✅ get all returns
 export const getAllReturns = async (_req: Request, res: Response) => {
   try {
     const db = getDatabase();
@@ -48,16 +97,15 @@ export const getAllReturns = async (_req: Request, res: Response) => {
     res.json(returns);
   } catch (error: any) {
     res.status(500).json({
-      message: "❌ خطأ في جلب بيانات الإرجاعات",
+      message: "Failed to fetch returns",
       error: error.message,
     });
   }
 };
 
-// ✅ get return by id
 export const getReturnById = async (req: Request, res: Response) => {
-  const { id } = req.params;
-  if (!id) return res.status(400).json({ message: "❌ return id is required" });
+  const id = req.params.id || req.body?.id;
+  if (!id) return res.status(400).json({ message: "return id is required" });
 
   try {
     const db = getDatabase();
@@ -65,57 +113,59 @@ export const getReturnById = async (req: Request, res: Response) => {
     const snapshot = await get(returnRef);
 
     if (!snapshot.exists()) {
-      return res.status(404).json({ message: "❌ عملية الإرجاع غير موجودة" });
+      return res.status(404).json({ message: "Return record not found" });
     }
 
     res.json(snapshot.val());
   } catch (error: any) {
     res
       .status(500)
-      .json({ message: "❌ خطأ في جلب عملية الإرجاع", error: error.message });
+      .json({ message: "Failed to fetch return record", error: error.message });
   }
 };
 
-// ✅ create return (customer return or purchase return)
 export const createReturn = async (req: Request, res: Response) => {
-  const { productCode, warehouse, qty, type, referenceId, reason } = req.body;
+  const { productCode, productId, warehouse, qty, type, referenceId, reason } = req.body;
 
-  if (!productCode || !warehouse || !qty || !type) {
+  if ((!productCode && !productId) || !warehouse || !qty || !type) {
     return res
       .status(400)
-      .json({ message: "❌ productCode, warehouse, qty, type مطلوبة" });
+      .json({ message: "productCode/productId, warehouse, qty, type are required" });
   }
 
   try {
     const db = getDatabase();
-    const warehouseKey = await resolveProductsWarehouseKey(warehouse);
-    const productRef = ref(db, `products/${warehouseKey}/${productCode}`);
-    const productSnap = await get(productRef);
+    const foundProduct = await findProductForReturn({
+      db,
+      productCode,
+      productId,
+      warehouse,
+    });
 
-    if (!productSnap.exists()) {
+    if (!foundProduct) {
       return res
         .status(404)
-        .json({ message: "❌ المنتج غير موجود في المستودع" });
+        .json({ message: "Product not found in warehouse" });
     }
 
-    const product = productSnap.val();
+    const { warehouseKey, productKey, product } = foundProduct;
+    const productRef = ref(db, `products/${warehouseKey}/${productKey}`);
+    const returnQty = Math.abs(toNumber(qty));
 
-    applyReturnToProduct(product, type, qty);
+    applyReturnToProduct(product, type, returnQty);
     product.updatedDate = new Date().toLocaleString();
 
-    // ✅ تحديث المنتج بعد التعديل
     await update(productRef, product);
 
-    // ✅ إنشاء سجل الإرجاع
     const returnId = uuidv4();
     const now = new Date().toLocaleString();
 
     const returnRecord: ReturnRecord = {
       id: returnId,
-      productCode,
-      productId: product.productID,
+      productCode: product.code || productCode || productKey,
+      productId: product.id || productKey,
       warehouse,
-      qty,
+      qty: returnQty,
       type,
       referenceId: referenceId || null,
       reason: reason || "",
@@ -125,35 +175,36 @@ export const createReturn = async (req: Request, res: Response) => {
     await set(ref(db, `returns/${returnId}`), returnRecord);
 
     res.json({
-      message: "✅ تم تسجيل عملية الإرجاع",
+      message: "Return record created",
       data: { returnRecord, product },
     });
   } catch (error: any) {
     res
       .status(500)
-      .json({ message: "❌ خطأ أثناء إنشاء الإرجاع", error: error.message });
+      .json({ message: "Failed to create return", error: error.message });
   }
 };
 
-// ✅ create return internal (للاستخدام داخل النظام)
 export const createReturnInternal = async (newReturn: ReturnData) => {
   try {
     const db = getDatabase();
-    const warehouseKey = await resolveProductsWarehouseKey(newReturn.warehouse);
-    const productRef = ref(
+    const foundProduct = await findProductForReturn({
       db,
-      `products/${warehouseKey}/${newReturn.productId}`
-    );
-    const productSnap = await get(productRef);
+      productCode: newReturn.productCode,
+      productId: newReturn.productId,
+      warehouse: newReturn.warehouse,
+    });
 
-    if (!productSnap.exists()) {
-      throw new Error("❌ المنتج غير موجود في المستودع");
+    if (!foundProduct) {
+      throw new Error("Product not found in warehouse");
     }
 
-    const product = productSnap.val();
+    const { warehouseKey, productKey, product } = foundProduct;
+    const productRef = ref(db, `products/${warehouseKey}/${productKey}`);
     const now = new Date().toLocaleString();
+    const returnQty = Math.abs(toNumber(newReturn.qty));
 
-    applyReturnToProduct(product, newReturn.type, newReturn.qty);
+    applyReturnToProduct(product, newReturn.type, returnQty);
     product.updatedDate = now;
 
     await update(productRef, product);
@@ -161,6 +212,9 @@ export const createReturnInternal = async (newReturn: ReturnData) => {
     const id = uuidv4();
     const returnRecord: ReturnRecord = {
       ...newReturn,
+      productCode: product.code || newReturn.productCode || productKey,
+      productId: product.id || newReturn.productId || productKey,
+      qty: returnQty,
       id,
       createdDate: now,
     };
@@ -170,7 +224,7 @@ export const createReturnInternal = async (newReturn: ReturnData) => {
     return { returnRecord, product };
   } catch (error: any) {
     throw new Error(
-      `❌ خطأ أثناء تنفيذ createReturnInternal: ${error.message}`
+      `Failed to execute createReturnInternal: ${error.message}`
     );
   }
 };

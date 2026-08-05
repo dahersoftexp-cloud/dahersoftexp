@@ -5,6 +5,7 @@ const router = express.Router();
 
 router.get('/', getAllReturns);
 router.post('/', createReturn);
+router.get("/:id", getReturnById);
 
 router.post("/byId", getReturnById);
 

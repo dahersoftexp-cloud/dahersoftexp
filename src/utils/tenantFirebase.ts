@@ -16,8 +16,10 @@ export { database, get, push, remove, runTransaction, set, update };
 
 export const getDatabase = () => database;
 
-export const rootRef = (path = "") =>
-  firebaseRef(database, normalizeDatabasePath(path));
+export const rootRef = (path = "") => {
+  const cleanPath = normalizeDatabasePath(path);
+  return cleanPath ? firebaseRef(database, cleanPath) : firebaseRef(database);
+};
 
 export const ref = (
   databaseOrPath?: Database | string | null,
