@@ -921,12 +921,14 @@ async function main() {
   }, {
     auth: false,
   });
+  const managerHeaders = {
+    Authorization: `Bearer ${defaultLogin.data?.token || ""}`,
+    "X-Inventory-Tenant-Id": "default",
+  };
 
   await expect("tenant isolation default products do not include qa data", "GET", "/api/products?pricing=full", undefined, {
     auth: false,
-    headers: {
-      Authorization: `Bearer ${defaultLogin.data?.token || ""}`,
-    },
+    headers: managerHeaders,
     validate(data) {
       assert.ok(
         !hasProductCode(data, names.productCode) &&
@@ -935,6 +937,23 @@ async function main() {
         "Default tenant should not see QA tenant products"
       );
     },
+  });
+
+  await expect("trials manager list for and", "GET", "/api/trials", undefined, {
+    auth: false,
+    headers: managerHeaders,
+    validate(data) {
+      assert.ok(Array.isArray(data?.trials), "Trial list should be returned");
+      assert.ok(
+        data.trials.some((trial) => trial?.tenantId === TENANT_ID),
+        "Created QA trial should be visible to and",
+      );
+    },
+  });
+
+  await expect("trials manager delete smoke tenant cleanup", "DELETE", `/api/trials/${TENANT_ID}`, undefined, {
+    auth: false,
+    headers: managerHeaders,
   });
 
   const failureCount = results.filter((result) => result.status === "fail").length;
