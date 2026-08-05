@@ -36,6 +36,7 @@ const parseLoginScope = (req: Request) => {
       return {
         tenantId: sanitizeTenantId(scopedUsername[1]),
         username: scopedUsername[2].trim(),
+        isExplicitTenant: true,
       };
     }
   }
@@ -43,6 +44,7 @@ const parseLoginScope = (req: Request) => {
   return {
     tenantId: sanitizeTenantId(requestedTenantId || DEFAULT_TENANT_ID),
     username: rawUsername,
+    isExplicitTenant: Boolean(requestedTenantId),
   };
 };
 
@@ -51,13 +53,17 @@ const getTenantMetadata = async (tenantId: string) => {
   return snapshot.exists() ? snapshot.val() : null;
 };
 
+const getUserSnapshot = (tenantId: string, username: string) =>
+  runWithTenant(tenantId, () => get(ref(`users/${username}`)));
+
 const isExpired = (expiresAt: unknown) => {
   const expiresTime = new Date(String(expiresAt || "")).getTime();
   return Number.isFinite(expiresTime) && expiresTime <= Date.now();
 };
 
 export const login = async (req: Request, res: Response) => {
-  const { username, tenantId } = parseLoginScope(req);
+  const loginScope = parseLoginScope(req);
+  const { username } = loginScope;
   const password = getStringValue(req.body?.password);
 
   try {
@@ -65,7 +71,8 @@ export const login = async (req: Request, res: Response) => {
       return res.status(400).json({ error: "Username and password are required" });
     }
 
-    const tenantMetadata = await getTenantMetadata(tenantId);
+    let tenantId = loginScope.tenantId;
+    let tenantMetadata = await getTenantMetadata(tenantId);
     if (tenantMetadata?.status && tenantMetadata.status !== "active") {
       return res.status(403).json({ error: "Trial is not active" });
     }
@@ -74,9 +81,36 @@ export const login = async (req: Request, res: Response) => {
       return res.status(403).json({ error: "Trial has expired" });
     }
 
-    const snapshot = await runWithTenant(tenantId, () =>
-      get(ref(`users/${username}`)),
-    );
+    let snapshot = await getUserSnapshot(tenantId, username);
+
+    if (
+      !snapshot.exists() &&
+      !loginScope.isExplicitTenant &&
+      tenantId === DEFAULT_TENANT_ID
+    ) {
+      const usernameTenantId = sanitizeTenantId(username);
+      if (usernameTenantId && usernameTenantId !== DEFAULT_TENANT_ID) {
+        const usernameTenantSnapshot = await getUserSnapshot(
+          usernameTenantId,
+          username,
+        );
+
+        if (usernameTenantSnapshot.exists()) {
+          tenantId = usernameTenantId;
+          tenantMetadata = await getTenantMetadata(tenantId);
+
+          if (tenantMetadata?.status && tenantMetadata.status !== "active") {
+            return res.status(403).json({ error: "Trial is not active" });
+          }
+
+          if (tenantMetadata?.expiresAt && isExpired(tenantMetadata.expiresAt)) {
+            return res.status(403).json({ error: "Trial has expired" });
+          }
+
+          snapshot = usernameTenantSnapshot;
+        }
+      }
+    }
 
     if (!snapshot.exists()) {
       return res.status(401).json({ error: "User not found" });
