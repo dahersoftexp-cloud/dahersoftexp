@@ -134,6 +134,10 @@ async function getProducts() {
   return Array.isArray(response.data) ? response.data : [];
 }
 
+function hasProductCode(products, code) {
+  return Array.isArray(products) && products.some((product) => product?.code === code);
+}
+
 function saleProduct(product, qty = 1) {
   return {
     id: product.id,
@@ -905,11 +909,32 @@ async function main() {
   await expect("currency migration preview", "GET", "/api/currency-migration/preview");
   await expect("currency migration run isolated tenant", "POST", "/api/currency-migration/run");
 
-  await expect("products tenant cache isolation setup default login", "POST", "/api/auth/login", {
+  await expect("tenant isolation qa products still visible", "GET", "/api/products?pricing=full", undefined, {
+    validate(data) {
+      assert.ok(hasProductCode(data, names.productCode), "QA tenant product should be visible in its own tenant");
+    },
+  });
+
+  const defaultLogin = await expect("tenant isolation default login", "POST", "/api/auth/login", {
     username: "and",
     password: "123123",
   }, {
     auth: false,
+  });
+
+  await expect("tenant isolation default products do not include qa data", "GET", "/api/products?pricing=full", undefined, {
+    auth: false,
+    headers: {
+      Authorization: `Bearer ${defaultLogin.data?.token || ""}`,
+    },
+    validate(data) {
+      assert.ok(
+        !hasProductCode(data, names.productCode) &&
+          !hasProductCode(data, names.directProductCode) &&
+          !hasProductCode(data, names.transferProductCode),
+        "Default tenant should not see QA tenant products"
+      );
+    },
   });
 
   const failureCount = results.filter((result) => result.status === "fail").length;
