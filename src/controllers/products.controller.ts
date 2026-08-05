@@ -11,9 +11,9 @@ import {
 } from "../utils/tenantFirebase";
 import { database } from "../firebaseConfig";
 import { getCurrentUserFromRequest } from "../utils/currentUser";
+import { getActiveTenantId } from "../utils/tenantContext";
 
-let productsCache: any = null;
-let lastFetch = 0;
+const productsCache = new Map<string, { products: any[]; lastFetch: number }>();
 let compareTime = 120_000
 
 const priceFields = [
@@ -32,7 +32,7 @@ const fullPricingPermissions = new Set([
 ]);
 
 const fetchReset = () => {
-  lastFetch = Date.now() - compareTime;
+  productsCache.clear();
 }
 
 export const resetProductsCache = fetchReset;
@@ -287,11 +287,14 @@ const shouldHideRestrictedPrices = (req: Request) => {
 
 export const getAll = async (req: Request, res: Response) => {
   try {
-    if (productsCache && Date.now() - lastFetch < compareTime) {
+    const tenantId = getActiveTenantId();
+    const cachedProducts = productsCache.get(tenantId);
+
+    if (cachedProducts && Date.now() - cachedProducts.lastFetch < compareTime) {
       return res.json(
         shouldHideRestrictedPrices(req)
-          ? productsCache.map(stripRestrictedPriceFields)
-          : productsCache,
+          ? cachedProducts.products.map(stripRestrictedPriceFields)
+          : cachedProducts.products,
       );
     }
 
@@ -306,8 +309,10 @@ export const getAll = async (req: Request, res: Response) => {
       : [];
 
     // تحديث الكاش
-    productsCache = products;
-    lastFetch = Date.now();
+    productsCache.set(tenantId, {
+      products,
+      lastFetch: Date.now(),
+    });
 
     res.json(
       shouldHideRestrictedPrices(req)
