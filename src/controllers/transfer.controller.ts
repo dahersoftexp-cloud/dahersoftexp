@@ -1,4 +1,4 @@
-import { ref, push } from "firebase/database";
+import { ref, push } from "../utils/tenantFirebase";
 import { database } from "../firebaseConfig";
 
 interface CreateTransferInput {

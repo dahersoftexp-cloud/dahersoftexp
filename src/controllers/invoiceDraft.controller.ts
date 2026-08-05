@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { get, ref, set } from "firebase/database";
+import { get, ref, set } from "../utils/tenantFirebase";
 import { database } from "../firebaseConfig";
 import { handleSell } from "../functions/transactions";
 import { InvoiceDraft, InvoiceDraftProduct } from "../types/invoiceDraft";

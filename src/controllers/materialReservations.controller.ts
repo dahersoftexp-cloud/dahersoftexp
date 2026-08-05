@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { get, ref, set, update } from "firebase/database";
+import { get, ref, set, update } from "../utils/tenantFirebase";
 import { v4 as uuidv4 } from "uuid";
 import { database } from "../firebaseConfig";
 import { handleSell } from "../functions/transactions";

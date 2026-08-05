@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { getDatabase, ref, get, set, update } from "firebase/database";
+import { getDatabase, ref, get, set, update } from "../utils/tenantFirebase";
 import { v4 as uuidv4 } from "uuid";
 import { resolveProductsWarehouseKey } from "./products.controller";
 

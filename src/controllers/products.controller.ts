@@ -8,7 +8,7 @@ import {
   remove,
   update,
   runTransaction,
-} from "firebase/database";
+} from "../utils/tenantFirebase";
 import { database } from "../firebaseConfig";
 import { getCurrentUserFromRequest } from "../utils/currentUser";
 

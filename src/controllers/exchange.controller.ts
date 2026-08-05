@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import { v4 as uuidv4 } from "uuid";
-import { get, ref, remove, set } from "firebase/database";
+import { get, ref, remove, set } from "../utils/tenantFirebase";
 import { database } from "../firebaseConfig";
 
 type ExchangeRecord = Record<string, any> & {

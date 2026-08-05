@@ -1,7 +1,7 @@
 import { Request, Response } from "express";
 import { v4 as uuidv4 } from "uuid";
 import { purchase } from "../types/purchase";
-import { ref, get, set, update, remove } from "firebase/database";
+import { ref, get, set, update, remove } from "../utils/tenantFirebase";
 import { createOrUpdateProductInternal } from "./products.controller";
 import { database } from "../firebaseConfig";
 

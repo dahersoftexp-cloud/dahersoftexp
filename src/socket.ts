@@ -6,6 +6,11 @@ import {
   saveInvoiceDraftInternal,
 } from "./controllers/invoiceDraft.controller";
 import { CurrentUser, getUserFromToken } from "./utils/currentUser";
+import {
+  DEFAULT_TENANT_ID,
+  runWithTenant,
+  sanitizeTenantId,
+} from "./utils/tenantContext";
 
 const getStringValue = (value: unknown) => {
   if (Array.isArray(value)) {
@@ -27,6 +32,9 @@ const getSocketUser = (socket: Socket): CurrentUser | null => {
 
   const username = getStringValue(auth.username || query.username);
   const userId = getStringValue(auth.userId || query.userId || username);
+  const tenantId = getStringValue(
+    auth.tenantId || query.tenantId || auth.companyCode || query.companyCode,
+  );
 
   if (!username && !userId) {
     return null;
@@ -35,10 +43,12 @@ const getSocketUser = (socket: Socket): CurrentUser | null => {
   return {
     userId: userId || username,
     username: username || userId,
+    tenantId: tenantId ? sanitizeTenantId(tenantId) : DEFAULT_TENANT_ID,
   };
 };
 
-const getInvoiceDraftRoom = (userId: string) => `invoice-draft:${userId}`;
+const getInvoiceDraftRoom = (tenantId: string | undefined, userId: string) =>
+  `invoice-draft:${sanitizeTenantId(tenantId || DEFAULT_TENANT_ID)}:${userId}`;
 
 const toTimestamp = (value: unknown) => {
   const timestamp = new Date(String(value || "")).getTime();
@@ -73,7 +83,7 @@ export const configureSocket = (server: HttpServer) => {
       return;
     }
 
-    const room = getInvoiceDraftRoom(user.userId);
+    const room = getInvoiceDraftRoom(user.tenantId, user.userId);
     socket.join(room);
 
     socket.on("invoice-draft:join", () => {
@@ -82,12 +92,13 @@ export const configureSocket = (server: HttpServer) => {
 
     socket.on("invoice-draft:update", async (payload: any = {}) => {
       try {
-        const currentDraft = payload.alreadySaved
-          ? await getInvoiceDraftInternal(user.userId)
-          : null;
-        const draft =
-          payload.alreadySaved &&
-          shouldIgnoreAlreadySavedDraft(currentDraft, payload.draft)
+        const draft = await runWithTenant(user.tenantId, async () => {
+          const currentDraft = payload.alreadySaved
+            ? await getInvoiceDraftInternal(user.userId)
+            : null;
+
+          return payload.alreadySaved &&
+            shouldIgnoreAlreadySavedDraft(currentDraft, payload.draft)
             ? currentDraft
             : payload.alreadySaved
               ? payload.draft
@@ -96,6 +107,7 @@ export const configureSocket = (server: HttpServer) => {
                   payload.draft || payload,
                   user.username,
                 );
+        });
 
         socket.to(room).emit("invoice-draft:changed", {
           clientId: payload.clientId,
@@ -110,9 +122,11 @@ export const configureSocket = (server: HttpServer) => {
 
     socket.on("invoice-draft:clear", async (payload: any = {}) => {
       try {
-        const draft = payload.alreadySaved
-          ? payload.draft
-          : await clearInvoiceDraftInternal(user.userId, user.username);
+        const draft = await runWithTenant(user.tenantId, async () =>
+          payload.alreadySaved
+            ? payload.draft
+            : await clearInvoiceDraftInternal(user.userId, user.username),
+        );
 
         socket.to(room).emit("invoice-draft:cleared", {
           clientId: payload.clientId,

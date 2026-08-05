@@ -34,7 +34,7 @@ import { Product, ProductPriceType } from "../types/product";
 import { purchase } from "../types/purchase";
 import { sell } from "../types/sell";
 import { database } from "../firebaseConfig";
-import { get, ref, update } from "firebase/database";
+import { get, ref, update } from "../utils/tenantFirebase";
 import {
   buildInvoiceMoneyBreakdown,
   buildPaymentMoneyBreakdown,

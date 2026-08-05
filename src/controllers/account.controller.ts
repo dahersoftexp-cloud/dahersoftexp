@@ -1,9 +1,10 @@
 import { v4 as uuidv4 } from "uuid";
 import { Request, Response } from "express";
-import { ref, get, set, update, remove } from "firebase/database";
+import { ref, get, set, update, remove } from "../utils/tenantFirebase";
 import { database } from "../firebaseConfig";
 import { Account } from "../types/account";
 import { normalizeCurrency, roundMoney, toMoneyNumber } from "../utils/money";
+import { ensureDefaultAccounts } from "../utils/defaultAccounts";
 
 
 const getAccountNature = (type: string): "Debit" | "Credit" => {
@@ -164,6 +165,7 @@ catch (error: any) {
 
 export const getAccount = async (req:Request , res:Response)=>{
     try{
+        await ensureDefaultAccounts();
         const dbRef = ref(database , 'accounts')
     const snapshot = await get(dbRef);
     const accounts = snapshot.exists() ? Object.values(snapshot.val()) : [];

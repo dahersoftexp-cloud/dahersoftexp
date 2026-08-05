@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { get, ref, update } from "firebase/database";
+import { get, ref, update } from "../utils/tenantFirebase";
 import { database } from "../firebaseConfig";
 import { normalizeAccountBalances } from "./account.controller";
 import { getCurrentUserFromRequest } from "../utils/currentUser";

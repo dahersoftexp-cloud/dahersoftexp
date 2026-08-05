@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from "uuid";
 import { Request, Response } from "express";
-import { ref, get, set, update, remove } from "firebase/database";
+import { ref, get, set, update, remove } from "../utils/tenantFirebase";
 import { database } from "../firebaseConfig";
 import { Warehouse } from "../types/warehouse";
 

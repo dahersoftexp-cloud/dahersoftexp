@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { get, push, ref, set, update } from "firebase/database";
+import { get, push, ref, set, update } from "../utils/tenantFirebase";
 import { database } from "../firebaseConfig";
 
 type DataRecord = Record<string, any>;

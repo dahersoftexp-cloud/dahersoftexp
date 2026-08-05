@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { ref, get, set, update, remove, push } from "firebase/database";
+import { ref, get, set, update, remove, push } from "../utils/tenantFirebase";
 import { v4 as uuidv4 } from "uuid";
 import { sell } from "../types/sell";
 import { Payment } from "../types/payment";

@@ -1,7 +1,7 @@
 import { v4 as uuidv4 } from "uuid";
 import { Request, Response } from "express";
 import { Payment } from "../types/payment";
-import { ref, get, set, push } from "firebase/database";
+import { ref, get, set, push } from "../utils/tenantFirebase";
 import { database } from "../firebaseConfig";
 import { updateAccountBalanceInternal } from "./account.controller";
 import { createJournalEntryInternal } from "./journalEntries.controller";

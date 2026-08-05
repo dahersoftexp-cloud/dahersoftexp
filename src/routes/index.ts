@@ -20,11 +20,13 @@ import materialReservationsRouter from "./materialReservations.routes";
 import quotationsRouter from "./quotations.routes";
 import vehiclesRouter from "./vehicles.routes";
 import currencyMigrationRouter from "./currencyMigration.routes";
+import trialsRouter from "./trials.routes";
 
 
 const router = Router();
 
 router.use("/auth", authRoutes);
+router.use("/trials", trialsRouter);
 router.use("/users", usersRouter);
 
 router.use("/products", productsRouter);

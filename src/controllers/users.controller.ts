@@ -1,11 +1,14 @@
 import { Request, Response } from "express";
-import { get, ref, remove, set, update } from "firebase/database";
+import { get, ref, remove, set, update } from "../utils/tenantFirebase";
 import { database } from "../firebaseConfig";
 import { InventoryUser, InventoryUserResponse } from "../types/user";
 import { getCurrentUserFromRequest } from "../utils/currentUser";
+import { ensureDefaultAccounts } from "../utils/defaultAccounts";
 
 const USERS_PATH = "users";
 const INVALID_FIREBASE_KEY_CHARS = /[.#$\/\[\]]/;
+const ARABIC_USERNAME_CHAR_PATTERN =
+  /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/;
 
 const getTimestamp = () => new Date().toISOString();
 
@@ -37,6 +40,9 @@ const toUserResponse = (
 
 const isInvalidUsername = (username: string) =>
   !username.trim() || INVALID_FIREBASE_KEY_CHARS.test(username);
+
+const hasArabicUsernameChars = (username: string) =>
+  ARABIC_USERNAME_CHAR_PATTERN.test(username);
 
 const requireAdmin = (req: Request, res: Response) => {
   const currentUser = getCurrentUserFromRequest(req);
@@ -102,6 +108,12 @@ export const createUser = async (req: Request, res: Response) => {
     });
   }
 
+  if (hasArabicUsernameChars(username)) {
+    return res
+      .status(400)
+      .json({ error: "Username cannot contain Arabic characters" });
+  }
+
   if (!password.trim()) {
     return res.status(400).json({ error: "Password is required" });
   }
@@ -127,6 +139,7 @@ export const createUser = async (req: Request, res: Response) => {
     };
 
     await set(dbRef, user);
+    await ensureDefaultAccounts();
 
     res.json({
       message: "User created successfully",

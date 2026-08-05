@@ -3,7 +3,7 @@ import { Customer } from "../types/customer";
 import { Request, Response } from "express";
 import { sell } from "../types/sell";
 import { Payment } from "../types/payment";
-import { ref, get, set, update, remove } from "firebase/database";
+import { ref, get, set, update, remove } from "../utils/tenantFirebase";
 import { database } from "../firebaseConfig";
 import { normalizeCurrency, roundMoney, toMoneyNumber } from "../utils/money";
 

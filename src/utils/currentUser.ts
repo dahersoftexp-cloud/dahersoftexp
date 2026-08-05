@@ -5,12 +5,25 @@ import { verifyToken } from "./jwt";
 export interface CurrentUser {
   userId: string;
   username: string;
+  tenantId?: string;
   role?: string;
   permissions?: string[];
 }
 
 const getStringValue = (value: unknown) =>
   typeof value === "string" && value.trim() ? value.trim() : "";
+
+const getHeaderStringValue = (value: unknown) => {
+  const headerValue = getStringValue(value);
+
+  if (!headerValue) return "";
+
+  try {
+    return decodeURIComponent(headerValue).trim();
+  } catch {
+    return headerValue;
+  }
+};
 
 export const sanitizeFirebaseKey = (key: string) =>
   key.replace(/[.#$\/\[\]]/g, "_");
@@ -22,18 +35,25 @@ export const getUserFromToken = (token?: string): CurrentUser | null => {
     const payload = verifyToken(token) as JwtPayload & {
       userId?: string;
       username?: string;
+      tenantId?: string;
+      companyCode?: string;
+      trialId?: string;
       role?: string;
       permissions?: unknown;
     };
 
     const username = getStringValue(payload.username || payload.userId || payload.sub);
     const userId = getStringValue(payload.userId || payload.username || payload.sub);
+    const tenantId = getStringValue(
+      payload.tenantId || payload.companyCode || payload.trialId,
+    );
 
     if (!username && !userId) return null;
 
     return {
       userId: userId || username,
       username: username || userId,
+      tenantId: tenantId || undefined,
       role: getStringValue(payload.role),
       permissions: Array.isArray(payload.permissions)
         ? payload.permissions
@@ -60,14 +80,19 @@ export const getCurrentUserFromRequest = (req: Request): CurrentUser | null => {
     return tokenUser;
   }
 
-  const username = getStringValue(
+  const username = getHeaderStringValue(
     req.headers["x-inventory-username"] || req.headers["x-username"],
   );
-  const userId = getStringValue(
+  const userId = getHeaderStringValue(
     req.headers["x-inventory-user-id"] || req.headers["x-user-id"] || username,
   );
   const role = getStringValue(
     req.headers["x-inventory-role"] || req.headers["x-user-role"],
+  );
+  const tenantId = getHeaderStringValue(
+    req.headers["x-inventory-tenant-id"] ||
+      req.headers["x-tenant-id"] ||
+      req.headers["x-company-code"],
   );
   const rawPermissions = getStringValue(
     req.headers["x-inventory-permissions"] || req.headers["x-user-permissions"],
@@ -80,6 +105,7 @@ export const getCurrentUserFromRequest = (req: Request): CurrentUser | null => {
   return {
     userId: userId || username,
     username: username || userId,
+    tenantId: tenantId || undefined,
     role,
     permissions: rawPermissions
       ? rawPermissions
