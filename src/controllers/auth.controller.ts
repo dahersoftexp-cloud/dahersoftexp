@@ -85,7 +85,6 @@ export const login = async (req: Request, res: Response) => {
 
     if (
       !snapshot.exists() &&
-      !loginScope.isExplicitTenant &&
       tenantId === DEFAULT_TENANT_ID
     ) {
       const usernameTenantId = sanitizeTenantId(username);
