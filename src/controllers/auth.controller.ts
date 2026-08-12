@@ -61,6 +61,50 @@ const isExpired = (expiresAt: unknown) => {
   return Number.isFinite(expiresTime) && expiresTime <= Date.now();
 };
 
+const getTenantAccessError = (tenantMetadata: any) => {
+  if (tenantMetadata?.status && tenantMetadata.status !== "active") {
+    return "Trial is not active";
+  }
+
+  if (tenantMetadata?.expiresAt && isExpired(tenantMetadata.expiresAt)) {
+    return "Trial has expired";
+  }
+
+  return "";
+};
+
+const getActiveTrialUserCandidates = async (username: string) => {
+  const trialsSnapshot = await get(rootRef("trialTenants"));
+  if (!trialsSnapshot.exists()) return [];
+
+  const trialTenants = trialsSnapshot.val() as Record<string, any>;
+  const candidates = [];
+
+  for (const [rawTenantId, tenantMetadata] of Object.entries(trialTenants)) {
+    const candidateTenantId = sanitizeTenantId(rawTenantId);
+
+    if (
+      !candidateTenantId ||
+      candidateTenantId === DEFAULT_TENANT_ID ||
+      getTenantAccessError(tenantMetadata)
+    ) {
+      continue;
+    }
+
+    const userSnapshot = await getUserSnapshot(candidateTenantId, username);
+
+    if (userSnapshot.exists()) {
+      candidates.push({
+        tenantId: candidateTenantId,
+        tenantMetadata,
+        snapshot: userSnapshot,
+      });
+    }
+  }
+
+  return candidates;
+};
+
 export const login = async (req: Request, res: Response) => {
   const loginScope = parseLoginScope(req);
   const { username } = loginScope;
@@ -73,12 +117,9 @@ export const login = async (req: Request, res: Response) => {
 
     let tenantId = loginScope.tenantId;
     let tenantMetadata = await getTenantMetadata(tenantId);
-    if (tenantMetadata?.status && tenantMetadata.status !== "active") {
-      return res.status(403).json({ error: "Trial is not active" });
-    }
-
-    if (tenantMetadata?.expiresAt && isExpired(tenantMetadata.expiresAt)) {
-      return res.status(403).json({ error: "Trial has expired" });
+    const initialTenantAccessError = getTenantAccessError(tenantMetadata);
+    if (initialTenantAccessError) {
+      return res.status(403).json({ error: initialTenantAccessError });
     }
 
     let snapshot = await getUserSnapshot(tenantId, username);
@@ -97,17 +138,30 @@ export const login = async (req: Request, res: Response) => {
         if (usernameTenantSnapshot.exists()) {
           tenantId = usernameTenantId;
           tenantMetadata = await getTenantMetadata(tenantId);
-
-          if (tenantMetadata?.status && tenantMetadata.status !== "active") {
-            return res.status(403).json({ error: "Trial is not active" });
-          }
-
-          if (tenantMetadata?.expiresAt && isExpired(tenantMetadata.expiresAt)) {
-            return res.status(403).json({ error: "Trial has expired" });
+          const usernameTenantAccessError = getTenantAccessError(tenantMetadata);
+          if (usernameTenantAccessError) {
+            return res.status(403).json({ error: usernameTenantAccessError });
           }
 
           snapshot = usernameTenantSnapshot;
         }
+      }
+    }
+
+    if (!snapshot.exists() && tenantId === DEFAULT_TENANT_ID) {
+      const trialCandidates = await getActiveTrialUserCandidates(username);
+
+      if (trialCandidates.length === 1) {
+        tenantId = trialCandidates[0].tenantId;
+        tenantMetadata = trialCandidates[0].tenantMetadata;
+        snapshot = trialCandidates[0].snapshot;
+      }
+
+      if (trialCandidates.length > 1) {
+        return res.status(400).json({
+          error:
+            "Company code is required for this username. Use companyCode:username or open /login?tenant=companyCode",
+        });
       }
     }
 
