@@ -19,6 +19,9 @@ const normalizePermissions = (permissions: unknown): string[] => {
 const getStringValue = (value: unknown) =>
   typeof value === "string" && value.trim() ? value.trim() : "";
 
+const DEFAULT_MANAGER_USERNAME =
+  getStringValue(process.env.TRIAL_MANAGER_USERNAME) || "and";
+
 const parseLoginScope = (req: Request) => {
   const rawUsername = getStringValue(req.body?.username);
   const requestedTenantId = getStringValue(
@@ -55,6 +58,9 @@ const getTenantMetadata = async (tenantId: string) => {
 
 const getUserSnapshot = (tenantId: string, username: string) =>
   runWithTenant(tenantId, () => get(ref(`users/${username}`)));
+
+const isDefaultManagerLogin = (username: string) =>
+  username.trim().toLowerCase() === DEFAULT_MANAGER_USERNAME.toLowerCase();
 
 const isExpired = (expiresAt: unknown) => {
   const expiresTime = new Date(String(expiresAt || "")).getTime();
@@ -123,6 +129,21 @@ export const login = async (req: Request, res: Response) => {
     }
 
     let snapshot = await getUserSnapshot(tenantId, username);
+
+    if (
+      !snapshot.exists() &&
+      tenantId !== DEFAULT_TENANT_ID &&
+      isDefaultManagerLogin(username)
+    ) {
+      tenantId = DEFAULT_TENANT_ID;
+      tenantMetadata = await getTenantMetadata(tenantId);
+      const defaultTenantAccessError = getTenantAccessError(tenantMetadata);
+      if (defaultTenantAccessError) {
+        return res.status(403).json({ error: defaultTenantAccessError });
+      }
+
+      snapshot = await getUserSnapshot(tenantId, username);
+    }
 
     if (
       !snapshot.exists() &&
