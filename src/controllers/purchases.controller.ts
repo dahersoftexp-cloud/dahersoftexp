@@ -95,7 +95,7 @@ export const createPurchaseInternal = async (
   newPurchase: purchase
 ): Promise<purchase> => {
   const id = uuidv4();
-  const NowDate = new Date().toLocaleString();
+  const NowDate = new Date().toISOString();
 
   const purchaseData: purchase = {
     ...newPurchase,

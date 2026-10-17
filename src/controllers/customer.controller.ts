@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from "uuid";
 import { Customer } from "../types/customer";
 import { Request, Response } from "express";
+import { canReadFull, customerLookupFields, listView, pickFields } from "../auth/resourceViews";
 import { sell } from "../types/sell";
 import { Payment } from "../types/payment";
 import { ref, get, set, update, remove } from "../utils/tenantFirebase";
@@ -157,12 +158,12 @@ export const reconcileCustomerBalanceInternal = async (
 /* =========================================================
    ✅ 1. جلب جميع العملاء
    ========================================================= */
-export const getAll = async (_req: Request, res: Response) => {
+export const getAll = async (req: Request, res: Response) => {
   try {
     const dbRef = ref(database, "customer");
     const snapshot = await get(dbRef);
 
-    res.json(snapshot.exists() ? Object.values(snapshot.val()) : []);
+    res.json(listView(req, "customers.read", snapshot.exists() ? Object.values(snapshot.val()) : [], customerLookupFields));
   } catch (error: any) {
     console.error("Error fetching customers:", error);
     res.status(500).json({ error: error.message });
@@ -178,7 +179,10 @@ export const create = async (req: Request, res: Response) => {
     const id = uuidv4();
 
     const newCustomer: Customer = {
-      ...req.body,
+      ...(canReadFull(req, "customers.read") ? req.body : {
+        ...pickFields(req.body, customerLookupFields.filter((field) => field !== "id")),
+        balance: 0, balanceUSD: 0, balanceSYP: 0, purchases: [],
+      }),
       id,
       createdDate: now,
       updatedDate: now,

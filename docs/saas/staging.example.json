@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "purpose": "isolated-staging",
+  "production": {
+    "projectId": "REPLACE_PRODUCTION_PROJECT_ID",
+    "databaseUrl": "https://REPLACE_PRODUCTION_DATABASE.firebaseio.com"
+  },
+  "staging": {
+    "projectId": "REPLACE_STAGING_PROJECT_ID",
+    "databaseUrl": "https://REPLACE_STAGING_DATABASE.firebaseio.com"
+  },
+  "tenantsRoot": "tenants",
+  "testTenantId": "qa-staging-warehouse"
+}

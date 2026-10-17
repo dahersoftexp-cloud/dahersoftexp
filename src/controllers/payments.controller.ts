@@ -124,6 +124,15 @@ export const createPayment = async (req: Request, res: Response) => {
   try {
     const { newPayment }: { newPayment: Payment } = req.body;
 
+    if (!newPayment || !["income", "expense"].includes(newPayment.type) ||
+        !Number.isFinite(Number(newPayment.amountUSD ?? newPayment.amount)) ||
+        Number(newPayment.amountUSD ?? newPayment.amount) === 0 ||
+        !newPayment.paymentAccountId ||
+        !(newPayment.type === "income" ? newPayment.salesAccountId : newPayment.expenseAccountId))
+      return res.status(400).json({ error: "يلزم مبلغ صالح وحساب دفع وحساب مقابل صالح" });
+    if (newPayment.sellId || newPayment.purchaseId || newPayment.customerId || newPayment.supplierId)
+      return res.status(409).json({ error: "استخدم مسار تسديد العميل أو المورد للدفعات المرتبطة بالفواتير", code: "LINKED_PAYMENT_REQUIRED" });
+
     const id = uuidv4();
     const now = new Date().toISOString();
 

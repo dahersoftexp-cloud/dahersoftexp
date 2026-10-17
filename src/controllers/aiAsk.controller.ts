@@ -1,6 +1,9 @@
 import { Request, Response } from "express";
 import { get, push, ref, set, update } from "../utils/tenantFirebase";
 import { database } from "../firebaseConfig";
+import { AuthError } from "../auth/accounts";
+import { acquireAiSlot } from "../auth/aiLimits";
+import { requireCurrentUser } from "../utils/currentUser";
 
 type DataRecord = Record<string, any>;
 
@@ -627,7 +630,6 @@ const simplifyPurchase = (purchase: DataRecord): DataRecord => ({
 const simplifyParty = (record: DataRecord): DataRecord => ({
   id: readText(record, ["id"], ""),
   name: recordName(record, "بدون اسم"),
-  number: readText(record, ["number", "phone"], ""),
   balance: readNumber(record, ["balance"]),
 });
 
@@ -739,7 +741,7 @@ const buildChatGPTContext = (
     generatedAt: new Date().toISOString(),
     timeZone: APP_TIME_ZONE,
     notes: [
-      "تم حذف بيانات users من السياق قبل الإرسال.",
+      "السياق يحتوي حقول أعمال محددة فقط؛ لا يحتوي بيانات الهوية أو إعدادات الشركة.",
       "بعض القوائم قد تكون مختصرة إذا كان عدد السجلات كبيراً.",
       "الأرصدة السالبة للعملاء تعتبر مديونية على العملاء في هذا النظام.",
       "الأرصدة الموجبة للموردين تعتبر مديونية للموردين في هذا النظام.",
@@ -777,18 +779,32 @@ const buildChatGPTContext = (
   };
 };
 
-const buildContextPayload = (rawData: Record<string, unknown>): string => {
-  const limits = [MAX_CONTEXT_ITEMS, 100, 50, 20, 10];
+export const buildContextPayload = (rawData: Record<string, unknown>): string => {
+  const limits = [MAX_CONTEXT_ITEMS, 100, 50, 20, 10, 5, 0];
 
   for (const limit of limits) {
     const payload = JSON.stringify(buildChatGPTContext(rawData, limit));
 
-    if (payload.length <= MAX_CONTEXT_CHARS) {
+    if (Buffer.byteLength(payload, "utf8") <= MAX_CONTEXT_CHARS) {
       return payload;
     }
   }
 
-  return JSON.stringify(buildChatGPTContext(rawData, 5));
+  throw new AuthError(413, "AI_CONTEXT_TOO_LARGE");
+};
+
+export const AI_BUSINESS_PATHS = ["products", "sells", "purchases", "customer", "supplier", "payment", "returns", "accounts", "warehouses"] as const;
+export const readAiBusinessData = async (): Promise<Record<string, unknown>> => {
+  // Never read the tenant root: future private configuration is excluded by default.
+  // These are still whole-collection reads. Aggregates/pagination belong to the provider phase.
+  const entries = await Promise.all(AI_BUSINESS_PATHS.map(async (path) => {
+    const snapshot = await get(ref(database, path));
+    return [path, snapshot.exists() ? snapshot.val() : null] as const;
+  }));
+  const data = Object.fromEntries(entries);
+  if (Buffer.byteLength(JSON.stringify(data), "utf8") > 5 * 1024 * 1024)
+    throw new AuthError(413, "AI_SOURCE_TOO_LARGE");
+  return data;
 };
 
 const extractOpenAIText = (responseData: DataRecord): string => {
@@ -819,15 +835,6 @@ const extractOpenAIText = (responseData: DataRecord): string => {
   return texts.join("\n").trim();
 };
 
-const extractOpenAIErrorMessage = (body: string): string => {
-  try {
-    const parsed = JSON.parse(body);
-    return parsed?.error?.message || body;
-  } catch {
-    return body;
-  }
-};
-
 const askChatGPT = async (
   question: string,
   rawData: Record<string, unknown>
@@ -841,6 +848,7 @@ const askChatGPT = async (
   const model = process.env.OPENAI_MODEL || DEFAULT_OPENAI_MODEL;
   const contextPayload = buildContextPayload(rawData);
   const response = await fetch(OPENAI_RESPONSES_URL, {
+    signal: AbortSignal.timeout(30_000),
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -863,9 +871,7 @@ const askChatGPT = async (
   const responseText = await response.text();
 
   if (!response.ok) {
-    throw new Error(
-      `OpenAI API error ${response.status}: ${extractOpenAIErrorMessage(responseText)}`
-    );
+    throw new Error("AI_PROVIDER_UNAVAILABLE");
   }
 
   const responseData = JSON.parse(responseText) as DataRecord;
@@ -940,6 +946,7 @@ const buildAIAnswer = (question: string, rawData: Record<string, unknown>): stri
 };
 
 export const askAI = async (req: Request, res: Response) => {
+  let release: (() => void) | undefined;
   try {
     const question =
       typeof req.body?.question === "string" ? req.body.question.trim() : "";
@@ -947,12 +954,10 @@ export const askAI = async (req: Request, res: Response) => {
     if (!question) {
       return res.status(400).json({ message: "السؤال مطلوب." });
     }
-
-    const snapshot = await get(ref(database));
-    const databaseValue = snapshot.exists()
-      ? (snapshot.val() as Record<string, unknown>)
-      : {};
-    const { users, ...safeData } = databaseValue;
+    if (question.length > 2000 || Buffer.byteLength(question, "utf8") > 8000)
+      return res.status(413).json({ error: "AI_QUESTION_TOO_LARGE" });
+    release = acquireAiSlot(requireCurrentUser(req).tenantId);
+    const safeData = await readAiBusinessData();
     const answer = await askChatGPT(question, safeData);
     const createdAt = new Date().toISOString();
     const historyRef = push(ref(database, "ai/history"));
@@ -990,7 +995,7 @@ export const askAI = async (req: Request, res: Response) => {
       createdAt,
     });
   } catch (error: any) {
-    console.error("Error answering AI question:", error);
+    if (error instanceof AuthError) return res.status(error.status).json({ error: error.code });
     const isMissingOpenAIKey = String(error?.message || "").includes(
       "OPENAI_API_KEY"
     );
@@ -999,7 +1004,8 @@ export const askAI = async (req: Request, res: Response) => {
       message: isMissingOpenAIKey
         ? "مفتاح OpenAI غير مضبوط. أضف OPENAI_API_KEY إلى ملف .env ثم أعد تشغيل السيرفر."
         : "حدث خطأ أثناء تجهيز إجابة ChatGPT.",
-      error: error?.message,
     });
+  } finally {
+    release?.();
   }
 };

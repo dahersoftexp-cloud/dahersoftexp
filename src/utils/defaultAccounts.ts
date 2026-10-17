@@ -1,5 +1,5 @@
 import { Account } from "../types/account";
-import { get, ref, update } from "./tenantFirebase";
+import { ref, runTransaction } from "./tenantFirebase";
 
 type DefaultAccount = Omit<Account, "createdAt" | "updatedAt">;
 
@@ -177,70 +177,30 @@ export const buildDefaultAccounts = (timestamp = new Date().toISOString()) =>
     ]),
   ) as Record<string, Account>;
 
-const buildZeroBalancePatch = (updatedAt: string) => ({
-  ...zeroBalances,
-  updatedAt,
-});
-
-export const ensureDefaultAccounts = async (
-  options: { resetBalances?: boolean } = {},
-) => {
-  const accountsSnapshot = await get(ref("accounts"));
-  const existingAccounts = accountsSnapshot.exists()
-    ? (accountsSnapshot.val() as Record<string, Partial<Account>>)
-    : {};
-  const existingEntries = Object.entries(existingAccounts);
-  const timestamp = new Date().toISOString();
-  const updates: Record<string, unknown> = {};
-
-  for (const account of defaultAccounts) {
-    const matchingEntry =
-      existingAccounts[account.id] !== undefined
-        ? ([account.id, existingAccounts[account.id]] as [
-            string,
-            Partial<Account>,
-          ])
-        : existingEntries.find(([, existingAccount]) => {
-            return String(existingAccount?.code || "") === account.code;
-          });
-
-    if (!matchingEntry) {
-      updates[`accounts/${account.id}`] = {
-        ...account,
-        createdAt: timestamp,
-        updatedAt: timestamp,
-      };
-      continue;
+/** Explicit bootstrap only: add missing defaults, preserving all existing fields. */
+export const initializeMissingDefaultAccounts = async () => {
+  const defaults = buildDefaultAccounts();
+  let created: string[] = [];
+  await runTransaction(ref("accounts"), (current) => {
+    created = []; // Firebase can retry this callback.
+    if (
+      current !== null &&
+      (typeof current !== "object" || Array.isArray(current))
+    )
+      throw new Error("INVALID_ACCOUNTS_STORE");
+    const next: Record<string, Account> = { ...(current || {}) };
+    for (const account of Object.values(defaults)) {
+      if (
+        next[account.id] !== undefined ||
+        Object.values(next).some(
+          (existing) => String(existing?.code || "") === account.code,
+        )
+      )
+        continue;
+      next[account.id] = account;
+      created.push(account.id);
     }
-
-    const [accountId] = matchingEntry;
-    const basePatch: Partial<Account> = {
-      id: accountId,
-      name: account.name,
-      code: account.code,
-      type: account.type,
-      category: account.category,
-      parentId: account.parentId,
-      nature: account.nature,
-      currency: account.currency,
-      description: account.description,
-      isActive: true,
-      isSystem: true,
-      allowTransactions: true,
-      updatedAt: timestamp,
-    };
-    const patch = options.resetBalances
-      ? { ...basePatch, ...buildZeroBalancePatch(timestamp) }
-      : basePatch;
-
-    Object.entries(patch).forEach(([key, value]) => {
-      updates[`accounts/${accountId}/${key}`] = value;
-    });
-  }
-
-  if (Object.keys(updates).length > 0) {
-    await update(ref(), updates);
-  }
-
-  return updates;
+    return created.length ? next : undefined;
+  });
+  return created;
 };

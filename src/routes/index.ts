@@ -21,9 +21,19 @@ import quotationsRouter from "./quotations.routes";
 import vehiclesRouter from "./vehicles.routes";
 import currencyMigrationRouter from "./currencyMigration.routes";
 import trialsRouter from "./trials.routes";
+import { protectFinancialRouter } from "../tenancy/financialRoutes";
 
 
 const router = Router();
+
+for (const [name, financialRouter] of [
+  ["products", productsRouter], ["suppliers", suppliersRouter], ["customers", customersRouter],
+  ["purchases", purchasesRouter], ["transactions", transactionsRouter], ["payments", paymentsRouter],
+  ["sells", sellsRouter], ["account", account], ["returns", returnsRouter],
+  ["journal-entries", journalEntriesRouter], ["material-reservations", materialReservationsRouter],
+  ["vehicles", vehiclesRouter], ["invoice-draft", invoiceDraftRouter], ["exchange", exchangeRouter],
+  ["quotations", quotationsRouter], ["currency-migration", currencyMigrationRouter],
+] as const) protectFinancialRouter(financialRouter, name);
 
 router.use("/auth", authRoutes);
 router.use("/trials", trialsRouter);

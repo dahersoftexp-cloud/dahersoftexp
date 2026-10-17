@@ -364,9 +364,12 @@ const assertAccountCanTransact = async (
   }
 
   const account = accountSnapshot.val();
-  if (account?.allowTransactions === false) {
+  if (account?.allowTransactions === false || account?.isActive === false) {
     throw new Error(`${label} account does not allow transactions`);
   }
+  const expectedTypes: Record<string, string> = { Sales: "Revenue", Payment: "Asset", Receivable: "Asset", Inventory: "Asset", Payable: "Liability", Expense: "Expense" };
+  if (expectedTypes[label] && account.type !== expectedTypes[label])
+    throw new Error(`${label} account has an incompatible type`);
 };
 
 const toJournalLines = (entries: LedgerEntry[], note: string) => {
@@ -635,11 +638,19 @@ export const handlePurchase = async ({
   newPurchase: purchase;
   newProduct: Product;
 }) => {
+  if (!newProduct || !Number.isFinite(Number(newProduct.quantity)) || Number(newProduct.quantity) <= 0 ||
+      !Number.isFinite(Number(newProduct.payPrice)) || Number(newProduct.payPrice) < 0)
+    throw new Error("كمية الشراء والتكلفة غير صالحتين");
+  const supplierSnapshot = await get(ref(database, `supplier/${newPurchase.supplierId}`));
+  if (!newPurchase.supplierId || !supplierSnapshot.exists() || supplierSnapshot.val().isActive === false)
+    throw new Error("المورد غير موجود أو غير نشط");
   const purchaseStatus = normalizePaymentStatus(newPurchase.paymentStatus);
   const submittedTotal = toFiniteNumber(
     newPurchase.totalPrice,
     toFiniteNumber(newPurchase.payPrice) * toFiniteNumber(newPurchase.quantity),
   );
+  if (roundMoney(submittedTotal) !== roundMoney(Number(newProduct.quantity) * Number(newProduct.payPrice)))
+    throw new Error("إجمالي الشراء لا يطابق كمية الصنف وتكلفته");
   const purchaseMoney = buildMoneyFromSubmittedInvoice({
     totalUSD: submittedTotal,
     paymentStatus: purchaseStatus,
@@ -771,6 +782,18 @@ export const handleBulkPurchase = async ({
   if (!products.length) {
     throw new Error("Purchase invoice must include at least one product");
   }
+
+  for (const product of products) {
+    if (!Number.isFinite(Number(product.quantity)) || Number(product.quantity) <= 0 ||
+        !Number.isFinite(Number(product.payPrice)) || Number(product.payPrice) < 0 || !product.warehouse)
+      throw new Error("كمية الشراء والتكلفة والمستودع مطلوبة وصالحة");
+    const lineTotal = roundMoney(Number(product.payPrice) * Number(product.quantity));
+    if (product.lineTotal !== undefined && roundMoney(Number(product.lineTotal)) !== lineTotal)
+      throw new Error("مجموع السطر لا يطابق الكمية والتكلفة");
+  }
+  const supplierSnapshot = await get(ref(database, `supplier/${newPurchase.supplierId}`));
+  if (!newPurchase.supplierId || !supplierSnapshot.exists() || supplierSnapshot.val().isActive === false)
+    throw new Error("المورد غير موجود أو غير نشط");
 
   const totalPrice = products.reduce(
     (sum, product) =>
@@ -943,6 +966,16 @@ export const handleSell = async ({
   stockUpdater?: SellStockUpdater;
 }) => {
   try {
+    if (!Array.isArray(newSell.products) || !newSell.products.length)
+      throw new Error("يجب إدخال صنف واحد على الأقل");
+    for (const product of newSell.products) {
+      if (!Number.isFinite(Number(product.qty)) || Number(product.qty) <= 0)
+        throw new Error("كمية البيع يجب أن تكون رقماً موجباً");
+      if (!product.id || !product.warehouse) throw new Error("بيانات الصنف والمستودع مطلوبة");
+    }
+    const customerSnapshot = await get(ref(database, `customer/${newSell.customerId}`));
+    if (!newSell.customerId || !customerSnapshot.exists() || customerSnapshot.val().isActive === false)
+      throw new Error("العميل غير موجود أو غير نشط");
     let productsForSell: sell["products"] = newSell.products.map((product) => ({
       ...product,
       qty: toFiniteNumber(product.qty),
@@ -954,6 +987,7 @@ export const handleSell = async ({
 
     if (!stockUpdater) {
       const normalizedProducts: sell["products"] = [];
+      const requestedQuantities = new Map<string, number>();
 
       for (const product of productsForSell) {
         const stockProduct = await assertProductAvailableForSellInternal(
@@ -962,6 +996,11 @@ export const handleSell = async ({
           product.qty,
           product.code,
         );
+        const key = `${stockProduct.warehouse}/${stockProduct.id}`;
+        const requested = (requestedQuantities.get(key) || 0) + product.qty;
+        if (requested > Number(stockProduct.quantity || 0) - Number(stockProduct.reservedQuantity || 0))
+          throw new Error("مجموع الكمية المطلوبة للصنف يتجاوز المخزون المتاح");
+        requestedQuantities.set(key, requested);
 
         normalizedProducts.push(
           normalizeSellProductFromStock(product, stockProduct),
@@ -1189,12 +1228,18 @@ export const handleSell = async ({
 
     return sellData;
   } catch (err) {
-    console.log(err);
+    console.error(err);
     throw err;
   }
 };
 
 export const customerPayment = async (paymentData: Payment) => {
+  const customer = await get(ref(database, `customer/${paymentData.customerId}`));
+  if (!paymentData.customerId || !customer.exists() || customer.val().isActive === false)
+    throw new Error("العميل غير موجود أو غير نشط");
+  if (paymentData.paymentAccountId === paymentData.receivableAccountId)
+    throw new Error("حساب الصندوق وحساب المدينين يجب أن يكونا مختلفين");
+  await Promise.all([assertAccountCanTransact(paymentData.paymentAccountId, "Payment"), assertAccountCanTransact(paymentData.receivableAccountId, "Receivable")]);
   const normalizedPayment = normalizePaymentForStorage(paymentData);
   const updatedSell = await applyCustomerPaymentToSell(normalizedPayment);
   const data = await createPaymentInternal(normalizedPayment);
@@ -1254,6 +1299,12 @@ export const customerPayment = async (paymentData: Payment) => {
 };
 
 export const supplierPayment = async (paymentData: Payment) => {
+  const supplier = await get(ref(database, `supplier/${paymentData.supplierId}`));
+  if (!paymentData.supplierId || !supplier.exists() || supplier.val().isActive === false)
+    throw new Error("المورد غير موجود أو غير نشط");
+  if (paymentData.paymentAccountId === paymentData.payableAccountId)
+    throw new Error("حساب الصندوق وحساب الدائنين يجب أن يكونا مختلفين");
+  await Promise.all([assertAccountCanTransact(paymentData.paymentAccountId, "Payment"), assertAccountCanTransact(paymentData.payableAccountId, "Payable")]);
   const normalizedPayment = normalizePaymentForStorage(paymentData);
   const updatedPurchase = await applySupplierPaymentToPurchase(normalizedPayment);
   const data = await createPaymentInternal(normalizedPayment);
@@ -1948,10 +1999,14 @@ export const warehouseTransfer = async (transferData: {
   payableAccountId?: string;
 }) => {
   try {
+    if (!Number.isFinite(Number(transferData.quantity)) || Number(transferData.quantity) <= 0)
+      throw new Error("كمية النقل يجب أن تكون موجبة");
+    if (!transferData.oldWarehouse || !transferData.newWarehouse || transferData.oldWarehouse === transferData.newWarehouse)
+      throw new Error("يجب تحديد مستودعين مختلفين");
     const product = await getProductByIdInternal(transferData.productId);
 
     if (product?.message) {
-      return product.message;
+      throw new Error(product.message);
     }
 
     const currentStock = Number(product.product.quantity || 0);
@@ -2043,7 +2098,7 @@ export const warehouseTransfer = async (transferData: {
         });
       }
 
-      await postLedgerEntries([
+      const transferEntries: LedgerEntry[] = [
         {
           accountId: transferData.expenseAccountId,
           entryType: "debit",
@@ -2083,10 +2138,16 @@ export const warehouseTransfer = async (transferData: {
             transferExchangeRate,
           ),
         },
-      ]);
+      ];
+      await postLedgerEntries(transferEntries);
+      await createJournalEntryInternal({
+        description: `تكلفة نقل ${product.product.name}`,
+        referenceType: "warehouse_transfer",
+        lines: toJournalLines(transferEntries, transferData.note || "تكلفة نقل"),
+      });
     }
   } catch (err) {
-    console.log(err);
-    return err;
+    console.error(err);
+    throw err;
   }
 };

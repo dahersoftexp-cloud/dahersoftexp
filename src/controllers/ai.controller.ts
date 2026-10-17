@@ -656,9 +656,6 @@ const buildReportSnapshot = (report: Record<string, unknown>) => ({
 
 export const saveAiReport = async (req: Request, res: Response) => {
   try {
-
-    console.log("REQ BODY:", JSON.stringify(req.body, null, 2));
-
     const reportPayload = extractSavePayload(req.body);
 
     if (!reportPayload) {
@@ -667,8 +664,6 @@ export const saveAiReport = async (req: Request, res: Response) => {
         message: "AI report payload not found",
       });
     }
-
-    console.log("AI REPORT PAYLOAD:", reportPayload);
 
     if (containsAIError(reportPayload)) {
       return res.status(400).json({
@@ -757,8 +752,6 @@ export const getSnapshot = async (req: Request, res: Response) => {
 
 
 export const getLatestResponse = async (req: Request, res: Response) => {
-  console.log("Received request to /latest");
-
   try {
     const snapshot = await get(ref(database, "ai"));
 
@@ -807,22 +800,5 @@ export const getLatestResponse = async (req: Request, res: Response) => {
 };
 
 export const allData = async (req: Request, res: Response) => {
-  const dbRef = ref(database);
-  try {
-    const snapshot = await get(dbRef);
-
-    if (snapshot.exists()) {
-      const data = snapshot.val() as Record<string, unknown>;
-      const { users, ...allDataExceptUsers } = data;
-
-      return res.status(200).json(allDataExceptUsers);
-    } else {
-      return res.status(404).json({ error: "No data found." });
-    }
-  } catch (error) {
-    console.error("Error fetching all data except users:", error);
-    return res.status(500).json({
-      error: "An error occurred while fetching the data.",
-    });
-  }
+  return res.status(410).json({ error: "ENDPOINT_RETIRED" });
 };

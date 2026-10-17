@@ -1,13 +1,10 @@
 import express, { Request, Response } from "express";
 import { customerPayment, handleBulkPurchase, handleCustomerReturnSafe, handlePurchase, handleSell, handleSupplierReturn, supplierPayment, warehouseTransfer } from "../functions/transactions";
-import { addAfterSellDiscountInternal } from "../controllers/sells.controller";
-import { updateCustomerBalanceInternal } from "../controllers/customer.controller";
 import { endExchange } from "../controllers/exchange.controller";
 
 const router = express.Router();
 
 router.post("/purchase", async (req: Request, res: Response) => {
-  console.log(req.body)
   try {
     const { newPurchase, newProduct } = req.body;
 
@@ -116,25 +113,8 @@ router.post("/warehouseTransfer", async (req: Request, res: Response) => {
   }
 });
 
-router.post("/afterSellDiscount", async (req: Request, res: Response) => {
-  try {
-    const { discount, sellId, customerId } = req.body;
-
-    if (!discount || !sellId || !customerId) {
-      throw new Error("❌ بيانات الخصم أو معرف الفاتورة أو معرف العميل غير مكتملة");
-    }
-
-    await addAfterSellDiscountInternal({sellId, discount});
-
-    await updateCustomerBalanceInternal(
-      customerId,
-      discount
-    )
-
-    res.json({ message: "✅ تمت عملية الخصم بعد البيع" });
-  } catch (error: any) {
-    res.status(400).json({ message: error.message });
-  }
+router.post("/afterSellDiscount", (_req: Request, res: Response) => {
+  res.status(409).json({ code: "POSTED_RECORD_IMMUTABLE", message: "لا يمكن تغيير خصم فاتورة مرحلة مباشرة؛ استخدم مرتجعاً مرتبطاً بالفاتورة" });
 });
 
 

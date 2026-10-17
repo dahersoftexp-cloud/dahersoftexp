@@ -1,11 +1,24 @@
 import { Request, Response } from "express";
-import { get, ref, remove, set, update } from "../utils/tenantFirebase";
-import { database } from "../firebaseConfig";
+import { randomUUID } from "crypto";
 import { InventoryUser, InventoryUserResponse } from "../types/user";
 import { getCurrentUserFromRequest } from "../utils/currentUser";
-import { ensureDefaultAccounts } from "../utils/defaultAccounts";
+import {
+  getActiveTenantId,
+  getTenantDatabasePath,
+} from "../utils/tenantContext";
+import {
+  AuthError,
+  findAccount,
+  isUserKey,
+  listAccounts,
+  prepareManagedAccount,
+  principalFor,
+  reserveManagedProfile,
+  readObject,
+  writeAccountUpdates,
+} from "../auth/accounts";
+import { hashPassword, isValidPasswordInput } from "../auth/passwords";
 
-const USERS_PATH = "users";
 const INVALID_FIREBASE_KEY_CHARS = /[.#$\/\[\]]/;
 const ARABIC_USERNAME_CHAR_PATTERN =
   /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/;
@@ -16,7 +29,9 @@ const normalizePermissions = (permissions: unknown): string[] => {
   if (!Array.isArray(permissions)) return [];
 
   return permissions
-    .filter((permission): permission is string => typeof permission === "string")
+    .filter(
+      (permission): permission is string => typeof permission === "string",
+    )
     .map((permission) => permission.trim())
     .filter(Boolean);
 };
@@ -36,10 +51,13 @@ const toUserResponse = (
   vehicleName: user.vehicleName,
   createdAt: user.createdAt,
   updatedAt: user.updatedAt,
+  status: user.status,
 });
 
 const isInvalidUsername = (username: string) =>
-  !username.trim() || INVALID_FIREBASE_KEY_CHARS.test(username);
+  !isUserKey(username) ||
+  !username.trim() ||
+  INVALID_FIREBASE_KEY_CHARS.test(username);
 
 const hasArabicUsernameChars = (username: string) =>
   ARABIC_USERNAME_CHAR_PATTERN.test(username);
@@ -61,15 +79,32 @@ const requireAdmin = (req: Request, res: Response) => {
 };
 
 const getUserEntries = async () => {
-  const snapshot = await get(ref(database, USERS_PATH));
-
-  return snapshot.exists()
-    ? Object.entries(snapshot.val() as Record<string, InventoryUser>)
-    : [];
+  const accounts = await listAccounts(getActiveTenantId());
+  return accounts.map((account) => {
+    let status = "active";
+    try {
+      principalFor(account);
+    } catch {
+      status = "revoked";
+    }
+    return [
+      account.key,
+      {
+        ...account.profile,
+        role: account.membership.role,
+        permissions: account.membership.permissions,
+        status,
+      },
+    ] as [string, InventoryUser];
+  });
 };
 
 const countAdmins = (users: Array<[string, InventoryUser]>) =>
-  users.filter(([, user]) => normalizeRole(user.role) === "admin").length;
+  users.filter(
+    ([, user]) =>
+      normalizeRole(user.role) === "admin" &&
+      (!user.status || user.status === "active"),
+  ).length;
 
 export const getAllUsers = async (req: Request, res: Response) => {
   if (!requireAdmin(req, res)) return;
@@ -81,8 +116,9 @@ export const getAllUsers = async (req: Request, res: Response) => {
 
     res.json(users);
   } catch (error: any) {
-    console.error("Error fetching users:", error);
-    res.status(500).json({ error: error.message });
+    res.status(error instanceof AuthError ? error.status : 503).json({
+      error: error instanceof AuthError ? error.code : "USER_LIST_UNAVAILABLE",
+    });
   }
 };
 
@@ -114,40 +150,44 @@ export const createUser = async (req: Request, res: Response) => {
       .json({ error: "Username cannot contain Arabic characters" });
   }
 
-  if (!password.trim()) {
+  if (!password.trim() || !isValidPasswordInput(password)) {
     return res.status(400).json({ error: "Password is required" });
   }
 
   try {
-    const dbRef = ref(database, `${USERS_PATH}/${username}`);
-    const snapshot = await get(dbRef);
-
-    if (snapshot.exists()) {
+    const tenantId = getActiveTenantId();
+    if (await findAccount(tenantId, username)) {
       return res.status(400).json({ error: "User already exists" });
     }
 
-    const now = getTimestamp();
-    const user: InventoryUser = {
-      username,
-      password,
+    const prepared = await prepareManagedAccount(tenantId, username, password, {
       role,
       permissions,
       ...(vehicleId ? { vehicleId } : {}),
       ...(vehicleName ? { vehicleName } : {}),
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    await set(dbRef, user);
-    await ensureDefaultAccounts();
+    });
+    const path = getTenantDatabasePath(`users/${username}`);
+    const reservation = await reserveManagedProfile(
+      tenantId,
+      username,
+      prepared.profile.identityId,
+    );
+    if (!reservation.committed)
+      return res.status(409).json({ error: "User already exists" });
+    await writeAccountUpdates({
+      ...prepared.updates,
+      [path]: prepared.profile,
+    });
 
     res.json({
       message: "User created successfully",
-      data: toUserResponse(username, user),
+      data: toUserResponse(username, prepared.profile as InventoryUser),
     });
   } catch (error: any) {
-    console.error("Error creating user:", error);
-    res.status(500).json({ error: error.message });
+    res.status(error instanceof AuthError ? error.status : 503).json({
+      error:
+        error instanceof AuthError ? error.code : "USER_CREATE_UNAVAILABLE",
+    });
   }
 };
 
@@ -162,27 +202,47 @@ export const updateUser = async (req: Request, res: Response) => {
   }
 
   try {
-    const dbRef = ref(database, `${USERS_PATH}/${id}`);
-    const snapshot = await get(dbRef);
-
-    if (!snapshot.exists()) {
+    const account = await findAccount(getActiveTenantId(), id);
+    if (!account) {
       return res.status(404).json({ error: "User not found" });
     }
 
-    const existingUser = snapshot.val() as InventoryUser;
+    const existingUser = {
+      ...account.profile,
+      role: account.membership.role,
+      permissions: account.membership.permissions,
+    } as InventoryUser;
+    if (
+      account.source === "legacy-root" &&
+      id === (process.env.TRIAL_MANAGER_USERNAME || "and") &&
+      currentUser.userId !== id &&
+      !currentUser.platformPermissions?.includes("tenants.manage")
+    )
+      return res.status(403).json({ error: "PLATFORM_IDENTITY_PROTECTED" });
     const nextRole =
-      req.body.role === undefined ? existingUser.role : normalizeRole(req.body.role);
+      req.body.role === undefined
+        ? existingUser.role
+        : normalizeRole(req.body.role);
+    const nextStatus =
+      req.body.status === undefined
+        ? account.membership.status || "active"
+        : req.body.status;
+    if (!["active", "revoked"].includes(nextStatus))
+      return res.status(400).json({ error: "INVALID_MEMBERSHIP_STATUS" });
 
     if (
       (currentUser.username === id || currentUser.userId === id) &&
-      nextRole !== "admin"
+      (nextRole !== "admin" || nextStatus !== "active")
     ) {
       return res
         .status(400)
         .json({ error: "You cannot remove admin role from your own user" });
     }
 
-    if (normalizeRole(existingUser.role) === "admin" && nextRole !== "admin") {
+    if (
+      normalizeRole(existingUser.role) === "admin" &&
+      (nextRole !== "admin" || nextStatus !== "active")
+    ) {
       const adminCount = countAdmins(await getUserEntries());
 
       if (adminCount <= 1) {
@@ -201,6 +261,7 @@ export const updateUser = async (req: Request, res: Response) => {
             ? normalizePermissions(existingUser.permissions)
             : normalizePermissions(req.body.permissions),
       updatedAt: getTimestamp(),
+      status: nextStatus,
     };
 
     if (req.body.vehicleId !== undefined) {
@@ -227,11 +288,52 @@ export const updateUser = async (req: Request, res: Response) => {
       }
     }
 
-    if (typeof req.body.password === "string" && req.body.password.trim()) {
-      updates.password = req.body.password;
+    const patches: Record<string, any> = {};
+    for (const [key, value] of Object.entries(updates))
+      patches[`${account.path}/${key}`] = value;
+    if (account.central) {
+      const membershipPath = `control/memberships/${account.tenantId}/${account.identityId}`;
+      patches[`${membershipPath}/role`] = updates.role;
+      patches[`${membershipPath}/permissions`] = updates.permissions;
+      patches[`${membershipPath}/updatedAt`] = updates.updatedAt;
+      patches[`${membershipPath}/status`] = updates.status;
     }
-
-    await update(dbRef, updates);
+    if (typeof req.body.password === "string" && req.body.password.trim()) {
+      if (!isValidPasswordInput(req.body.password))
+        return res.status(400).json({ error: "INVALID_PASSWORD" });
+      // A company administrator cannot reset a shared person's global credential.
+      if (
+        account.central &&
+        account.identity.managedByTenantId !== account.tenantId
+      )
+        return res
+          .status(403)
+          .json({ error: "SHARED_IDENTITY_PASSWORD_RESET_DENIED" });
+      if (account.central) {
+        const memberships = (await readObject("control/memberships")) || {};
+        if (
+          Object.entries(memberships).some(
+            ([tenantId, members]) =>
+              tenantId !== account.tenantId &&
+              members &&
+              typeof members === "object" &&
+              Object.prototype.hasOwnProperty.call(members, account.identityId),
+          )
+        )
+          return res
+            .status(403)
+            .json({ error: "SHARED_IDENTITY_PASSWORD_RESET_DENIED" });
+      }
+      const credentialPath = account.central
+        ? `control/identities/${account.identityId}`
+        : account.path;
+      patches[`${credentialPath}/passwordHash`] = await hashPassword(
+        req.body.password,
+      );
+      patches[`${credentialPath}/password`] = null;
+      patches[`${credentialPath}/sessionVersion`] = randomUUID();
+    }
+    await writeAccountUpdates(patches);
 
     const updatedUser: InventoryUser = {
       ...existingUser,
@@ -244,8 +346,10 @@ export const updateUser = async (req: Request, res: Response) => {
       data: toUserResponse(id, updatedUser),
     });
   } catch (error: any) {
-    console.error("Error updating user:", error);
-    res.status(500).json({ error: error.message });
+    res.status(error instanceof AuthError ? error.status : 503).json({
+      error:
+        error instanceof AuthError ? error.code : "USER_UPDATE_UNAVAILABLE",
+    });
   }
 };
 
@@ -264,14 +368,20 @@ export const deleteUser = async (req: Request, res: Response) => {
   }
 
   try {
-    const dbRef = ref(database, `${USERS_PATH}/${id}`);
-    const snapshot = await get(dbRef);
-
-    if (!snapshot.exists()) {
+    const account = await findAccount(getActiveTenantId(), id);
+    if (!account) {
       return res.status(404).json({ error: "User not found" });
     }
 
-    const existingUser = snapshot.val() as InventoryUser;
+    const existingUser = account.membership as InventoryUser;
+    const currentUser = getCurrentUserFromRequest(req)!;
+    if (
+      account.source === "legacy-root" &&
+      id === (process.env.TRIAL_MANAGER_USERNAME || "and") &&
+      currentUser.userId !== id &&
+      !currentUser.platformPermissions?.includes("tenants.manage")
+    )
+      return res.status(403).json({ error: "PLATFORM_IDENTITY_PROTECTED" });
 
     if (normalizeRole(existingUser.role) === "admin") {
       const adminCount = countAdmins(await getUserEntries());
@@ -283,10 +393,16 @@ export const deleteUser = async (req: Request, res: Response) => {
       }
     }
 
-    await remove(dbRef);
+    const patches: Record<string, any> = { [account.path]: null };
+    if (account.central)
+      patches[`control/memberships/${account.tenantId}/${account.identityId}`] =
+        null;
+    await writeAccountUpdates(patches);
     res.json({ message: "User deleted successfully" });
   } catch (error: any) {
-    console.error("Error deleting user:", error);
-    res.status(500).json({ error: error.message });
+    res.status(error instanceof AuthError ? error.status : 503).json({
+      error:
+        error instanceof AuthError ? error.code : "USER_DELETE_UNAVAILABLE",
+    });
   }
 };

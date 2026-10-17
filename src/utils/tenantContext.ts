@@ -1,112 +1,62 @@
 import { AsyncLocalStorage } from "async_hooks";
-import { NextFunction, Request, Response } from "express";
-import { getUserFromToken } from "./currentUser";
+import { getCurrentUserFromRequest } from "./currentUser";
+import type { Request } from "express";
 
 export interface TenantContext {
   tenantId: string;
 }
-
 const tenantStorage = new AsyncLocalStorage<TenantContext>();
-
-export const TENANTS_ROOT = process.env.TENANTS_ROOT || "tenants";
-export const DEFAULT_TENANT_ID = sanitizeTenantId(
+export function validateTenantId(value: unknown): string {
+  if (typeof value !== "string" || !/^[a-z0-9][a-z0-9_-]{0,127}$/.test(value))
+    throw new Error("INVALID_TENANT_ID");
+  return value;
+}
+// Slug generation is for provisioning only; authentication uses strict validation.
+export function sanitizeTenantId(value: string) {
+  return validateTenantId(
+    value
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, "-")
+      .replace(/^-+|-+$/g, ""),
+  );
+}
+export const TENANTS_ROOT = validateTenantId(
+  process.env.TENANTS_ROOT || "tenants",
+);
+if (["control", "users"].includes(TENANTS_ROOT))
+  throw new Error("TENANTS_ROOT must not overlap identity or control data.");
+export const DEFAULT_TENANT_ID = validateTenantId(
   process.env.DEFAULT_TENANT_ID || "default",
 );
-
-const getStringValue = (value: unknown) => {
-  if (Array.isArray(value)) {
-    return typeof value[0] === "string" ? value[0].trim() : "";
-  }
-
-  return typeof value === "string" && value.trim() ? value.trim() : "";
-};
-
-const getDecodedStringValue = (value: unknown) => {
-  const rawValue = getStringValue(value);
-  if (!rawValue) return "";
-
-  try {
-    return decodeURIComponent(rawValue).trim();
-  } catch {
-    return rawValue;
-  }
-};
-
-export function sanitizeTenantId(value: string) {
-  const normalized = value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-
-  return normalized || "default";
-}
-
+export const LEGACY_ROOT_TENANT_ID = validateTenantId(
+  process.env.LEGACY_ROOT_TENANT_ID || DEFAULT_TENANT_ID,
+);
 export const normalizeDatabasePath = (path = "") =>
   path.replace(/^\/+|\/+$/g, "");
-
-export const getActiveTenantId = () =>
-  tenantStorage.getStore()?.tenantId || DEFAULT_TENANT_ID;
-
+export const getActiveTenantId = () => {
+  const tenantId = tenantStorage.getStore()?.tenantId;
+  if (!tenantId) throw new Error("TENANT_CONTEXT_REQUIRED");
+  return tenantId;
+};
 export const getTenantDatabasePath = (
   path = "",
   tenantId = getActiveTenantId(),
 ) => {
-  const safeTenantId = sanitizeTenantId(tenantId);
+  const tenantRoot = `${TENANTS_ROOT}/${validateTenantId(tenantId)}`;
   const cleanPath = normalizeDatabasePath(path);
-  const tenantRootPath = `${TENANTS_ROOT}/${safeTenantId}`;
-
-  if (!cleanPath) return tenantRootPath;
-  if (cleanPath === tenantRootPath || cleanPath.startsWith(`${tenantRootPath}/`)) {
+  if (!cleanPath) return tenantRoot;
+  if (cleanPath === tenantRoot || cleanPath.startsWith(`${tenantRoot}/`))
     return cleanPath;
-  }
-
-  return `${tenantRootPath}/${cleanPath}`;
+  if (cleanPath === TENANTS_ROOT || cleanPath.startsWith(`${TENANTS_ROOT}/`))
+    throw new Error("CROSS_TENANT_PATH");
+  return `${tenantRoot}/${cleanPath}`;
 };
-
-export function runWithTenant<T>(tenantId: string | undefined, callback: () => T) {
-  return tenantStorage.run(
-    { tenantId: sanitizeTenantId(tenantId || DEFAULT_TENANT_ID) },
-    callback,
-  );
+export function runWithTenant<T>(tenantId: string, callback: () => T) {
+  return tenantStorage.run({ tenantId: validateTenantId(tenantId) }, callback);
 }
-
-const getRequestToken = (req: Request) => {
-  const authorization = req.headers.authorization || "";
-  return authorization.startsWith("Bearer ")
-    ? authorization.slice("Bearer ".length)
-    : "";
-};
-
 export const getTenantIdFromRequest = (req: Request) => {
-  const tokenTenantId = getUserFromToken(getRequestToken(req))?.tenantId;
-  if (tokenTenantId) return sanitizeTenantId(tokenTenantId);
-
-  const headerTenantId = getDecodedStringValue(
-    req.headers["x-inventory-tenant-id"] ||
-      req.headers["x-tenant-id"] ||
-      req.headers["x-company-code"],
-  );
-  if (headerTenantId) return sanitizeTenantId(headerTenantId);
-
-  const body = req.body || {};
-  const bodyTenantId = getStringValue(
-    body.tenantId || body.trialId || body.companyCode,
-  );
-  if (bodyTenantId) return sanitizeTenantId(bodyTenantId);
-
-  const queryTenantId = getStringValue(
-    req.query.tenantId || req.query.trialId || req.query.companyCode,
-  );
-  if (queryTenantId) return sanitizeTenantId(queryTenantId);
-
-  return DEFAULT_TENANT_ID;
-};
-
-export const bindTenantContext = (
-  req: Request,
-  _res: Response,
-  next: NextFunction,
-) => {
-  runWithTenant(getTenantIdFromRequest(req), next);
+  const user = getCurrentUserFromRequest(req);
+  if (!user) throw new Error("TENANT_CONTEXT_REQUIRED");
+  return user.tenantId;
 };

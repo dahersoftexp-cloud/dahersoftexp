@@ -1,9 +1,13 @@
-import dotenv from "dotenv";
+import "dotenv/config";
+import { assertRuntimeConfiguration } from "./config/runtime";
+
+// Validate before importing the application or initializing Firebase.
+assertRuntimeConfiguration();
+
 import http from "http";
 import app from "./app";
 import { configureSocket } from "./socket";
 
-dotenv.config();
 
 const PORT = process.env.PORT || 5000;
 

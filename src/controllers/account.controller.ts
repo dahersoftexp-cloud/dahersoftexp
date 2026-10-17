@@ -1,10 +1,11 @@
 import { v4 as uuidv4 } from "uuid";
 import { Request, Response } from "express";
-import { ref, get, set, update, remove } from "../utils/tenantFirebase";
+import { ref, get, set, update, runTransaction } from "../utils/tenantFirebase";
 import { database } from "../firebaseConfig";
 import { Account } from "../types/account";
 import { normalizeCurrency, roundMoney, toMoneyNumber } from "../utils/money";
-import { ensureDefaultAccounts } from "../utils/defaultAccounts";
+import { initializeMissingDefaultAccounts } from "../utils/defaultAccounts";
+import { accountLookupFields, listView } from "../auth/resourceViews";
 
 
 const getAccountNature = (type: string): "Debit" | "Credit" => {
@@ -89,7 +90,7 @@ export const createAccount = async (req : Request , res : Response)=>{
     const accountCurrency = normalizeCurrency(currency);
         const numericOpeningBalance = Number(openingBalance || 0);
 
-    if (isNaN(numericOpeningBalance)) {
+    if (!Number.isFinite(numericOpeningBalance)) {
       return res.status(400).json({ error: "الرصيد الافتتاحي يجب أن يكون رقماً" });
     }
 
@@ -101,9 +102,13 @@ export const createAccount = async (req : Request , res : Response)=>{
             ? numericOpeningBalance
             : Number(currentBalance);
 
-    if (isNaN(numeriCcurrentBalance)) {
+    if (!Number.isFinite(numeriCcurrentBalance)) {
       return res.status(400).json({ error: "الرصيد الافتتاحي يجب أن يكون رقماً" });
     }
+    if (numericOpeningBalance !== 0 || numeriCcurrentBalance !== 0)
+      return res.status(400).json({ error: "أنشئ الحساب برصيد صفر ثم سجّل الرصيد الافتتاحي بقيد يومية متوازن", code: "OPENING_JOURNAL_REQUIRED" });
+    if (!["Asset", "Liability", "Equity", "Revenue", "Expense"].includes(type))
+      return res.status(400).json({ error: "نوع الحساب غير صالح" });
     const openingBalanceUSD =
       accountCurrency === "USD" ? numericOpeningBalance : 0;
     const openingBalanceSYP =
@@ -163,13 +168,21 @@ catch (error: any) {
 
 }
 
+export const initializeDefaultAccounts = async (_req: Request, res: Response) => {
+  try {
+    const created = await initializeMissingDefaultAccounts();
+    return res.json({ created });
+  } catch {
+    return res.status(503).json({ error: "ACCOUNT_INITIALIZATION_UNAVAILABLE" });
+  }
+};
+
 export const getAccount = async (req:Request , res:Response)=>{
     try{
-        await ensureDefaultAccounts();
         const dbRef = ref(database , 'accounts')
     const snapshot = await get(dbRef);
     const accounts = snapshot.exists() ? Object.values(snapshot.val()) : [];
-    res.status(200).json(accounts);
+    res.status(200).json(listView(req, "accounts.read", accounts, accountLookupFields));
     
     }catch (error: any) {
     console.error("Error fetching accounts:", error);
@@ -209,6 +222,14 @@ export const updateAccount = async (req: Request, res: Response) => {
         }
 
         const currentAccount = snapshot.val();
+
+        const normalized = normalizeAccountBalances(currentAccount);
+        for (const field of ["currentBalance", "currentBalanceUSD", "currentBalanceSYP", "openingBalance", "openingBalanceUSD", "openingBalanceSYP"] as const) {
+          if (req.body[field] !== undefined && Number(req.body[field]) !== Number(normalized[field] || 0))
+            return res.status(409).json({ error: "يجب تعديل الرصيد من خلال قيد يومية متوازن", code: "ACCOUNT_BALANCE_IMMUTABLE" });
+        }
+        if ((type && type !== currentAccount.type) || (currency && currency !== currentAccount.currency))
+          return res.status(409).json({ error: "لا يمكن تغيير طبيعة الحساب أو عملته بعد إنشائه" });
 
         // التحقق من الرمز إذا تم تغييره
         if (code && code.trim() !== currentAccount.code) {
@@ -304,10 +325,10 @@ export const deleteAccount = async (req: Request, res: Response) => {
             return res.status(403).json({ error: "لا يمكن حذف الحسابات النظام" });
         }
 
-        // حذف الحساب
-        await remove(accountRef);
+        // Keep identifiers and history resolvable, including references in older records.
+        await update(accountRef, { isActive: false, allowTransactions: false, archivedAt: new Date().toISOString() });
 
-        res.status(200).json({ message: "تم حذف الحساب بنجاح", id });
+        res.status(200).json({ message: "تمت أرشفة الحساب مع الاحتفاظ بسجله", id });
     } catch (error: any) {
         console.error("Error deleting account:", error);
         res.status(500).json({ error: "فشل في حذف الحساب" });
@@ -331,21 +352,20 @@ export const updateAccountBalanceInternal = async ({
   amountSYP?: number;
 }): Promise<Account> => {
   const accountRef = ref(database, `accounts/${accountId}`);
-  const snapshot = await get(accountRef);
-
-  if (!snapshot.exists()) {
+  const result = await runTransaction(accountRef, current => {
+  if (!current) {
     throw new Error("الحساب غير موجود");
   }
 
-  const account: Account = normalizeAccountBalances(snapshot.val());
+  const account: Account = normalizeAccountBalances(current);
 
-  if (!account.allowTransactions) {
+  if (account.allowTransactions === false || account.isActive === false) {
     throw new Error("هذا الحساب لا يسمح بإجراء حركات عليه");
   }
 
   const numericAmount = Number(amount);
 
-  if (isNaN(numericAmount) || numericAmount <= 0) {
+  if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
     throw new Error("قيمة الحركة يجب أن تكون أكبر من صفر");
   }
 
@@ -389,14 +409,10 @@ export const updateAccountBalanceInternal = async ({
     updatedAt: new Date().toISOString(),
   };
 
-  await update(accountRef, {
-    currentBalance: updatedAccount.currentBalance,
-    currentBalanceUSD: updatedAccount.currentBalanceUSD,
-    currentBalanceSYP: updatedAccount.currentBalanceSYP,
-    updatedAt: updatedAccount.updatedAt,
-  });
-
   return updatedAccount;
+  });
+  if (!result.committed) throw new Error("تعذر ترحيل الحركة إلى الحساب");
+  return result.snapshot.val() as Account;
 }
 
 const getCollectionValues = async (path: string) => {

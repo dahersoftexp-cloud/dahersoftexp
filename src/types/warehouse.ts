@@ -12,4 +12,8 @@ export interface Warehouse {
   defaultSalesAccountId?: string;
   createdDate: string;
   updatedDate: string;
+  revision?: number;
+  isArchived?: boolean;
+  archivedAt?: string;
+  driverAssignmentManaged?: boolean;
 }

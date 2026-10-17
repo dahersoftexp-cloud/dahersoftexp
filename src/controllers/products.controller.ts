@@ -11,10 +11,8 @@ import {
 } from "../utils/tenantFirebase";
 import { database } from "../firebaseConfig";
 import { getCurrentUserFromRequest } from "../utils/currentUser";
-import { getActiveTenantId } from "../utils/tenantContext";
+import { canReadFull } from "../auth/resourceViews";
 
-const productsCache = new Map<string, { products: any[]; lastFetch: number }>();
-let compareTime = 120_000
 
 const priceFields = [
   "payPrice",
@@ -32,7 +30,7 @@ const fullPricingPermissions = new Set([
 ]);
 
 const fetchReset = () => {
-  productsCache.clear();
+  // Compatibility hook: business reads are fresh REST reads across all instances.
 }
 
 export const resetProductsCache = fetchReset;
@@ -287,17 +285,6 @@ const shouldHideRestrictedPrices = (req: Request) => {
 
 export const getAll = async (req: Request, res: Response) => {
   try {
-    const tenantId = getActiveTenantId();
-    const cachedProducts = productsCache.get(tenantId);
-
-    if (cachedProducts && Date.now() - cachedProducts.lastFetch < compareTime) {
-      return res.json(
-        shouldHideRestrictedPrices(req)
-          ? cachedProducts.products.map(stripRestrictedPriceFields)
-          : cachedProducts.products,
-      );
-    }
-
     const snapshot = await get(ref(database, "products"));
 
     const products = snapshot.exists()
@@ -307,12 +294,6 @@ export const getAll = async (req: Request, res: Response) => {
           ),
         )
       : [];
-
-    // تحديث الكاش
-    productsCache.set(tenantId, {
-      products,
-      lastFetch: Date.now(),
-    });
 
     res.json(
       shouldHideRestrictedPrices(req)
@@ -480,9 +461,9 @@ export const getProductById = async (req: Request, res: Response) => {
 
     res.json({
       product: productResponse,
-      purchases: purchasesResponse,
-      sells: sellsResponse,
-      transfers,
+      purchases: canReadFull(req, "purchases.read") ? purchasesResponse : [],
+      sells: canReadFull(req, "sales.read") ? sellsResponse : [],
+      transfers: canReadFull(req, "stock.transfer") ? transfers : [],
     });
   } catch (error) {
     console.error("❌ خطأ في جلب المنتج:", error);
@@ -994,7 +975,6 @@ export const getByWarehouse = async (req: Request, res: Response) => {
   try {
     const { warehouse } = req.body;
     const warehouseKey = await resolveProductsWarehouseKey(String(warehouse || ""));
-    console.log(warehouse)
 
     const productsSnapshot = await get(ref(database, `products/${warehouseKey}`));
 
@@ -1007,7 +987,7 @@ export const getByWarehouse = async (req: Request, res: Response) => {
       normalizeProductRecord(id, warehouseKey, product),
     );
 
-    res.json({ products });
+    res.json({ products: shouldHideRestrictedPrices(req) ? products.map(stripRestrictedPriceFields) : products });
   } catch (error) {
     console.error("❌ خطأ في جلب المنتجات:", error);
     res

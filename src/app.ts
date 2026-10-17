@@ -2,19 +2,19 @@ import express from "express";
 import cors from "cors";
 import routes from "./routes/index";
 import morgan from "morgan";
-import { bindTenantContext } from "./utils/tenantContext";
+import { requireTenantSession } from "./auth/middleware";
+import { requireApiPermission } from "./auth/authorization";
 
 const app = express();
 
 app.use(cors());
 app.use(express.json());
 app.use(morgan("dev"));
-app.use(bindTenantContext);
 
-app.use("/api", routes);
+app.use("/api", requireTenantSession, requireApiPermission, routes);
 
-app.get('/', (req, res) => {
-  res.send('Welcome to the server!');
+app.get("/", (req, res) => {
+  res.send("Welcome to the server!");
 });
 
 app.use("*", (req, res) => {

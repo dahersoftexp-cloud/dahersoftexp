@@ -2,126 +2,77 @@ import { Request } from "express";
 import { JwtPayload } from "jsonwebtoken";
 import { verifyToken } from "./jwt";
 
+export type UserSource = "legacy-root" | "tenant";
 export interface CurrentUser {
+  userId: string; // Company-local key, preserved for drafts and driver references.
+  username: string;
+  tenantId: string;
+  identityId: string;
+  source: UserSource;
+  role: string;
+  permissions: string[];
+  sessionVersion: string;
+  platformPermissions?: string[];
+  vehicleId?: string;
+  vehicleName?: string;
+}
+export interface TokenIdentity {
   userId: string;
   username: string;
   tenantId?: string;
-  role?: string;
-  permissions?: string[];
+  identityId?: string;
+  source?: UserSource;
+  sessionVersion?: string;
+  expiresAt: number;
 }
-
-const getStringValue = (value: unknown) =>
-  typeof value === "string" && value.trim() ? value.trim() : "";
-
-const getHeaderStringValue = (value: unknown) => {
-  const headerValue = getStringValue(value);
-
-  if (!headerValue) return "";
-
-  try {
-    return decodeURIComponent(headerValue).trim();
-  } catch {
-    return headerValue;
-  }
-};
-
+const requestUsers = new WeakMap<Request, CurrentUser>();
+const stringValue = (value: unknown) =>
+  typeof value === "string" ? value.trim() : "";
 export const sanitizeFirebaseKey = (key: string) =>
   key.replace(/[.#$\/\[\]]/g, "_");
 
-export const getUserFromToken = (token?: string): CurrentUser | null => {
+/** Decoding identifies a candidate only. Membership still needs a database check. */
+export const getUserFromToken = (token?: string): TokenIdentity | null => {
   if (!token) return null;
-
   try {
-    const payload = verifyToken(token) as JwtPayload & {
-      userId?: string;
-      username?: string;
-      tenantId?: string;
-      companyCode?: string;
-      trialId?: string;
-      role?: string;
-      permissions?: unknown;
-    };
-
-    const username = getStringValue(payload.username || payload.userId || payload.sub);
-    const userId = getStringValue(payload.userId || payload.username || payload.sub);
-    const tenantId = getStringValue(
-      payload.tenantId || payload.companyCode || payload.trialId,
-    );
-
-    if (!username && !userId) return null;
-
+    const payload = verifyToken(token) as JwtPayload;
+    if (
+      !payload ||
+      typeof payload !== "object" ||
+      !Number.isFinite(payload.exp)
+    )
+      return null;
+    const userId = stringValue(payload.userId || payload.username);
+    if (!userId) return null;
+    const source = payload.source;
+    if (source !== undefined && source !== "legacy-root" && source !== "tenant")
+      return null;
     return {
-      userId: userId || username,
-      username: username || userId,
-      tenantId: tenantId || undefined,
-      role: getStringValue(payload.role),
-      permissions: Array.isArray(payload.permissions)
-        ? payload.permissions
-            .filter(
-              (permission): permission is string =>
-                typeof permission === "string" && Boolean(permission.trim()),
-            )
-            .map((permission) => permission.trim())
-        : [],
+      userId,
+      username: stringValue(payload.username) || userId,
+      tenantId: stringValue(payload.tenantId) || undefined,
+      identityId: stringValue(payload.identityId) || undefined,
+      source,
+      sessionVersion: stringValue(payload.sessionVersion) || undefined,
+      expiresAt: Number(payload.exp) * 1000,
     };
-  } catch (error) {
+  } catch {
     return null;
   }
 };
-
-export const getCurrentUserFromRequest = (req: Request): CurrentUser | null => {
-  const authorization = req.headers.authorization || "";
-  const token = authorization.startsWith("Bearer ")
-    ? authorization.slice("Bearer ".length)
+export const getRequestToken = (req: Request) => {
+  const authorization = req.headers.authorization;
+  return typeof authorization === "string" &&
+    authorization.startsWith("Bearer ")
+    ? authorization.slice(7)
     : "";
-  const tokenUser = getUserFromToken(token);
-
-  if (tokenUser) {
-    return tokenUser;
-  }
-
-  const username = getHeaderStringValue(
-    req.headers["x-inventory-username"] || req.headers["x-username"],
-  );
-  const userId = getHeaderStringValue(
-    req.headers["x-inventory-user-id"] || req.headers["x-user-id"] || username,
-  );
-  const role = getStringValue(
-    req.headers["x-inventory-role"] || req.headers["x-user-role"],
-  );
-  const tenantId = getHeaderStringValue(
-    req.headers["x-inventory-tenant-id"] ||
-      req.headers["x-tenant-id"] ||
-      req.headers["x-company-code"],
-  );
-  const rawPermissions = getStringValue(
-    req.headers["x-inventory-permissions"] || req.headers["x-user-permissions"],
-  );
-
-  if (!username && !userId) {
-    return null;
-  }
-
-  return {
-    userId: userId || username,
-    username: username || userId,
-    tenantId: tenantId || undefined,
-    role,
-    permissions: rawPermissions
-      ? rawPermissions
-          .split(",")
-          .map((permission) => permission.trim())
-          .filter(Boolean)
-      : [],
-  };
 };
-
+export const setCurrentUserOnRequest = (req: Request, user: CurrentUser) =>
+  requestUsers.set(req, user);
+export const getCurrentUserFromRequest = (req: Request): CurrentUser | null =>
+  requestUsers.get(req) || null;
 export const requireCurrentUser = (req: Request): CurrentUser => {
   const user = getCurrentUserFromRequest(req);
-
-  if (!user) {
-    throw new Error("USER_REQUIRED");
-  }
-
+  if (!user) throw new Error("USER_REQUIRED");
   return user;
 };

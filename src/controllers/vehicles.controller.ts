@@ -1,6 +1,5 @@
 import { Request, Response } from "express";
-import { get, push, ref, set, update } from "../utils/tenantFirebase";
-import { v4 as uuidv4 } from "uuid";
+import { get, push, ref, update } from "../utils/tenantFirebase";
 import { database } from "../firebaseConfig";
 import { createTransferInternal } from "./transfer.controller";
 import {
@@ -11,16 +10,32 @@ import { handleSell } from "../functions/transactions";
 import { Product } from "../types/product";
 import { sell } from "../types/sell";
 import { Warehouse } from "../types/warehouse";
+import { getWarehouseRepository } from "../repositories/warehouses.repository";
+import { sendWarehouseError } from "./warehouseErrorResponse";
+import { AuthError, findAccount, principalFor } from "../auth/accounts";
+import { WarehouseError } from "../repositories/warehouseErrors";
 import {
   getCurrentUserFromRequest,
   type CurrentUser,
 } from "../utils/currentUser";
 
-const WAREHOUSES_PATH = "warehouses";
 const PRODUCTS_PATH = "products";
 const USERS_PATH = "users";
 const SELLS_PATH = "sells";
 const INVALID_WAREHOUSE_PATH_CHARS = /[.#$\/\[\]]/;
+
+const validateVehicleDriver = async (tenantId: string, driverId: string) => {
+  if (!driverId) return;
+  try {
+    const account = await findAccount(tenantId, driverId);
+    if (!account) throw new WarehouseError(400, "INVALID_VEHICLE_DRIVER");
+    principalFor(account);
+  } catch (error) {
+    if (error instanceof AuthError && error.status < 500)
+      throw new WarehouseError(400, "INVALID_VEHICLE_DRIVER");
+    throw error;
+  }
+};
 
 type VehicleWarehouse = Warehouse & {
   type: "vehicle";
@@ -69,7 +84,7 @@ const calculateDiscount = (source: any, subtotal: number) => {
       ? toNumber(source.discountAmount)
       : hasSubmittedValue(source.discountPercent)
         ? 0
-      : toNumber(source.discount);
+        : toNumber(source.discount);
 
   if (discountPercent < 0 || discountPercent > 100) {
     throw new Error("Discount percent must be between 0 and 100");
@@ -130,8 +145,7 @@ const getDateKey = (value: unknown) => {
 };
 
 const getAllWarehouses = async (): Promise<Warehouse[]> => {
-  const snapshot = await get(ref(database, WAREHOUSES_PATH));
-  return snapshot.exists() ? (Object.values(snapshot.val()) as Warehouse[]) : [];
+  return getWarehouseRepository().list();
 };
 
 const getVehicleWarehouses = async ({
@@ -149,18 +163,17 @@ const getVehicleWarehouses = async ({
     .filter((warehouse) => !activeOnly || warehouse.isActive !== false);
 
 const getVehicleById = async (id: string) => {
-  const snapshot = await get(ref(database, `${WAREHOUSES_PATH}/${id}`));
-
-  if (!snapshot.exists()) return null;
-
-  const warehouse = snapshot.val() as Warehouse;
+  const warehouse = await getWarehouseRepository().findById(id);
+  if (!warehouse) return null;
   if (warehouse.type !== "vehicle") return null;
 
   return { ...warehouse, type: "vehicle" as const };
 };
 
 const getProductsForWarehouse = async (warehouseName: string) => {
-  const snapshot = await get(ref(database, `${PRODUCTS_PATH}/${warehouseName}`));
+  const snapshot = await get(
+    ref(database, `${PRODUCTS_PATH}/${warehouseName}`),
+  );
 
   return snapshot.exists()
     ? (Object.values(snapshot.val()) as Product[]).map((product) => ({
@@ -176,9 +189,14 @@ const getProductsForWarehouse = async (warehouseName: string) => {
     : [];
 };
 
-const getSalesForWarehouse = async (warehouseName: string, date = todayKey()) => {
+const getSalesForWarehouse = async (
+  warehouseName: string,
+  date = todayKey(),
+) => {
   const snapshot = await get(ref(database, SELLS_PATH));
-  const sales = snapshot.exists() ? (Object.values(snapshot.val()) as sell[]) : [];
+  const sales = snapshot.exists()
+    ? (Object.values(snapshot.val()) as sell[])
+    : [];
 
   return sales.filter((sale) => {
     if (date && getDateKey(sale.date) !== date) return false;
@@ -200,11 +218,13 @@ const summarizeVehicle = async (vehicle: VehicleWarehouse, date?: string) => {
     0,
   );
   const stockCostValue = products.reduce(
-    (sum, product) => sum + toNumber(product.quantity) * toNumber(product.payPrice),
+    (sum, product) =>
+      sum + toNumber(product.quantity) * toNumber(product.payPrice),
     0,
   );
   const stockSellValue = products.reduce(
-    (sum, product) => sum + toNumber(product.quantity) * toNumber(product.sellPrice),
+    (sum, product) =>
+      sum + toNumber(product.quantity) * toNumber(product.sellPrice),
     0,
   );
   const salesTotal = sales.reduce(
@@ -241,47 +261,6 @@ const requireAdmin = (req: Request, res: Response) => {
   }
 
   return currentUser;
-};
-
-const getUserRecord = async (userKey: string) => {
-  const snapshot = await get(ref(database, `${USERS_PATH}/${userKey}`));
-  return snapshot.exists() ? (snapshot.val() as UserVehicleRecord) : null;
-};
-
-const attachVehicleToUser = async (vehicle: VehicleWarehouse) => {
-  if (!vehicle.driverId) return;
-
-  await update(ref(database, `${USERS_PATH}/${vehicle.driverId}`), {
-    vehicleId: vehicle.id,
-    vehicleName: vehicle.name,
-    updatedAt: new Date().toISOString(),
-  }).catch((error) => {
-    console.error("Failed to attach vehicle to user", error);
-  });
-};
-
-const clearVehicleFromUser = async (
-  userKey: string | undefined,
-  vehicle: VehicleWarehouse,
-) => {
-  if (!userKey) return;
-
-  const userRecord = await getUserRecord(userKey);
-  if (!userRecord) return;
-
-  const isLinkedToVehicle =
-    matchesLookupKey(userRecord.vehicleId, getLookupKeys(vehicle.id)) ||
-    matchesLookupKey(userRecord.vehicleName, getLookupKeys(vehicle.name));
-
-  if (!isLinkedToVehicle) return;
-
-  await update(ref(database, `${USERS_PATH}/${userKey}`), {
-    vehicleId: null,
-    vehicleName: null,
-    updatedAt: new Date().toISOString(),
-  }).catch((error) => {
-    console.error("Failed to clear vehicle from previous user", error);
-  });
 };
 
 const getUserRecordForCurrentUser = async (
@@ -331,13 +310,15 @@ const getCurrentUserVehicles = async (currentUser: CurrentUser) => {
 
   const linkedVehicles = vehicles.filter(
     (vehicle) =>
-      matchesLookupKey(vehicle.id, vehicleIdKeys) ||
-      matchesLookupKey(vehicle.name, vehicleNameKeys),
+      vehicle.driverAssignmentManaged !== true &&
+      (matchesLookupKey(vehicle.id, vehicleIdKeys) ||
+        matchesLookupKey(vehicle.name, vehicleNameKeys)),
   );
-  const driverVehicles = vehicles.filter(
-    (vehicle) =>
-      matchesLookupKey(vehicle.driverId, identityKeys) ||
-      matchesLookupKey(vehicle.driverName, identityKeys),
+  const driverVehicles = vehicles.filter((vehicle) =>
+    vehicle.driverAssignmentManaged === true
+      ? vehicle.driverId === currentUser.userId
+      : matchesLookupKey(vehicle.driverId, identityKeys) ||
+        matchesLookupKey(vehicle.driverName, identityKeys),
   );
   const vehiclesById = new Map<string, VehicleWarehouse>();
 
@@ -381,7 +362,9 @@ export const getAllVehicles = async (req: Request, res: Response) => {
     res.json({ data: summaries });
   } catch (error: any) {
     console.error("Error fetching vehicles:", error);
-    res.status(500).json({ message: error.message || "Failed to fetch vehicles" });
+    res
+      .status(500)
+      .json({ message: error.message || "Failed to fetch vehicles" });
   }
 };
 
@@ -399,11 +382,15 @@ export const getMyVehicleDashboard = async (req: Request, res: Response) => {
     );
 
     if (!selection.vehicles.length) {
-      return res.status(404).json({ message: "No vehicle assigned to this driver" });
+      return res
+        .status(404)
+        .json({ message: "No vehicle assigned to this driver" });
     }
 
     if (!selection.vehicle) {
-      return res.status(403).json({ message: "Vehicle is not assigned to this driver" });
+      return res
+        .status(403)
+        .json({ message: "Vehicle is not assigned to this driver" });
     }
 
     const date = String(req.query.date || todayKey());
@@ -418,7 +405,9 @@ export const getMyVehicleDashboard = async (req: Request, res: Response) => {
     res.json({ data: selectedSummary, vehicles: summaries });
   } catch (error: any) {
     console.error("Error fetching driver vehicle:", error);
-    res.status(500).json({ message: error.message || "Failed to fetch vehicle" });
+    res
+      .status(500)
+      .json({ message: error.message || "Failed to fetch vehicle" });
   }
 };
 
@@ -431,13 +420,15 @@ export const getMyVehicleDiagnostics = async (req: Request, res: Response) => {
 
     const userRecord = await getUserRecordForCurrentUser(currentUser);
     const activeVehicles = await getCurrentUserVehicles(currentUser);
-    const allVehicleSummaries = (await getVehicleWarehouses()).map((vehicle) => ({
-      id: vehicle.id,
-      name: vehicle.name,
-      isActive: vehicle.isActive !== false,
-      driverId: vehicle.driverId || "",
-      driverName: vehicle.driverName || "",
-    }));
+    const allVehicleSummaries = (await getVehicleWarehouses()).map(
+      (vehicle) => ({
+        id: vehicle.id,
+        name: vehicle.name,
+        isActive: vehicle.isActive !== false,
+        driverId: vehicle.driverId || "",
+        driverName: vehicle.driverName || "",
+      }),
+    );
 
     res.json({
       currentUser,
@@ -450,7 +441,8 @@ export const getMyVehicleDiagnostics = async (req: Request, res: Response) => {
         driverId: vehicle.driverId || "",
         driverName: vehicle.driverName || "",
       })),
-      allVehicles: currentUser.role === "admin" ? allVehicleSummaries : undefined,
+      allVehicles:
+        currentUser.role === "admin" ? allVehicleSummaries : undefined,
     });
   } catch (error: any) {
     console.error("Error fetching vehicle diagnostics:", error);
@@ -468,7 +460,9 @@ export const createVehicle = async (req: Request, res: Response) => {
     const name = String(req.body.name || "").trim();
 
     if (!name) {
-      return res.status(400).json({ message: "Vehicle warehouse name is required" });
+      return res
+        .status(400)
+        .json({ message: "Vehicle warehouse name is required" });
     }
 
     if (INVALID_WAREHOUSE_PATH_CHARS.test(name)) {
@@ -477,106 +471,103 @@ export const createVehicle = async (req: Request, res: Response) => {
       });
     }
 
-    const warehouses = await getAllWarehouses();
-    const nameExists = warehouses.some(
-      (warehouse) => warehouse.name.trim().toLowerCase() === name.toLowerCase(),
+    await validateVehicleDriver(
+      currentUser.tenantId,
+      req.body.driverId ? String(req.body.driverId) : "",
     );
 
-    if (nameExists) {
-      return res.status(400).json({ message: "Warehouse name already exists" });
-    }
+    const vehicle = (await getWarehouseRepository().create(
+      stripUndefined({
+        name,
+        location: String(req.body.location || ""),
+        isActive: true,
+        type: "vehicle",
+        plateNumber: req.body.plateNumber ? String(req.body.plateNumber) : "",
+        driverId: req.body.driverId ? String(req.body.driverId) : "",
+        driverName: req.body.driverName ? String(req.body.driverName) : "",
+        defaultPaymentAccountId: req.body.defaultPaymentAccountId
+          ? String(req.body.defaultPaymentAccountId)
+          : "",
+        defaultReceivableAccountId: req.body.defaultReceivableAccountId
+          ? String(req.body.defaultReceivableAccountId)
+          : "",
+        defaultSalesAccountId: req.body.defaultSalesAccountId
+          ? String(req.body.defaultSalesAccountId)
+          : "",
+      }),
+    )) as VehicleWarehouse;
 
-    const id = uuidv4();
-    const now = new Date().toLocaleString();
-    const vehicle: VehicleWarehouse = stripUndefined({
-      id,
-      name,
-      location: String(req.body.location || ""),
-      isActive: true,
-      type: "vehicle",
-      plateNumber: req.body.plateNumber ? String(req.body.plateNumber) : "",
-      driverId: req.body.driverId ? String(req.body.driverId) : "",
-      driverName: req.body.driverName ? String(req.body.driverName) : "",
-      defaultPaymentAccountId: req.body.defaultPaymentAccountId
-        ? String(req.body.defaultPaymentAccountId)
-        : "",
-      defaultReceivableAccountId: req.body.defaultReceivableAccountId
-        ? String(req.body.defaultReceivableAccountId)
-        : "",
-      defaultSalesAccountId: req.body.defaultSalesAccountId
-        ? String(req.body.defaultSalesAccountId)
-        : "",
-      createdDate: now,
-      updatedDate: now,
-    });
-
-    await set(ref(database, `${WAREHOUSES_PATH}/${id}`), vehicle);
-
-    await attachVehicleToUser(vehicle);
-
+    // driverId on managed vehicle records is the authoritative assignment.
     res.json({ message: "Vehicle created", data: vehicle });
   } catch (error: any) {
-    console.error("Error creating vehicle:", error);
-    res.status(500).json({ message: error.message || "Failed to create vehicle" });
+    sendWarehouseError(res, error);
   }
 };
 
 export const updateVehicle = async (req: Request, res: Response) => {
-  if (!requireAdmin(req, res)) return;
+  const currentUser = requireAdmin(req, res);
+  if (!currentUser) return;
 
   try {
+    if (
+      [
+        "id",
+        "name",
+        "type",
+        "createdDate",
+        "revision",
+        "driverAssignmentManaged",
+      ].some((key) => Object.prototype.hasOwnProperty.call(req.body || {}, key))
+    )
+      throw new WarehouseError(400, "WAREHOUSE_IDENTITY_IMMUTABLE");
     const vehicle = await getVehicleById(req.params.id);
     if (!vehicle) {
       return res.status(404).json({ message: "Vehicle not found" });
     }
 
+    if (req.body.driverId !== undefined)
+      await validateVehicleDriver(
+        currentUser.tenantId,
+        String(req.body.driverId),
+      );
     const updates: Partial<VehicleWarehouse> = stripUndefined({
       location:
-        req.body.location === undefined ? vehicle.location : String(req.body.location),
-      isActive:
-        req.body.isActive === undefined ? vehicle.isActive : Boolean(req.body.isActive),
+        req.body.location === undefined ? undefined : String(req.body.location),
+      isActive: req.body.isActive === undefined ? undefined : req.body.isActive,
       plateNumber:
         req.body.plateNumber === undefined
-          ? vehicle.plateNumber
+          ? undefined
           : String(req.body.plateNumber),
       driverId:
-        req.body.driverId === undefined ? vehicle.driverId : String(req.body.driverId),
+        req.body.driverId === undefined ? undefined : String(req.body.driverId),
       driverName:
         req.body.driverName === undefined
-          ? vehicle.driverName
+          ? undefined
           : String(req.body.driverName),
       defaultPaymentAccountId:
         req.body.defaultPaymentAccountId === undefined
-          ? vehicle.defaultPaymentAccountId
+          ? undefined
           : String(req.body.defaultPaymentAccountId),
       defaultReceivableAccountId:
         req.body.defaultReceivableAccountId === undefined
-          ? vehicle.defaultReceivableAccountId
+          ? undefined
           : String(req.body.defaultReceivableAccountId),
       defaultSalesAccountId:
         req.body.defaultSalesAccountId === undefined
-          ? vehicle.defaultSalesAccountId
+          ? undefined
           : String(req.body.defaultSalesAccountId),
-      updatedDate: new Date().toLocaleString(),
     });
-
-    await update(ref(database, `${WAREHOUSES_PATH}/${vehicle.id}`), updates);
-
-    const updatedVehicle = { ...vehicle, ...updates };
-
-    const previousDriverId = normalizeLookupValue(vehicle.driverId);
-    const nextDriverId = normalizeLookupValue(updatedVehicle.driverId);
-
-    if (previousDriverId && previousDriverId !== nextDriverId) {
-      await clearVehicleFromUser(previousDriverId, vehicle);
-    }
-
-    await attachVehicleToUser(updatedVehicle);
+    const updatedVehicle = (await getWarehouseRepository().update(
+      vehicle.id,
+      updates,
+      { expectedRevision: req.body.expectedRevision, expectedType: "vehicle" },
+    )) as VehicleWarehouse | null;
+    if (!updatedVehicle)
+      return res.status(404).json({ message: "Vehicle not found" });
 
     res.json({ message: "Vehicle updated", data: updatedVehicle });
   } catch (error: any) {
-    console.error("Error updating vehicle:", error);
-    res.status(500).json({ message: error.message || "Failed to update vehicle" });
+    sendWarehouseError(res, error);
   }
 };
 
@@ -602,13 +593,18 @@ export const loadVehicle = async (req: Request, res: Response) => {
       normalizeLookupValue(sourceWarehouse).toLowerCase() ===
         normalizeLookupValue(vehicle.name).toLowerCase()
     ) {
-      return res.status(400).json({ message: "Valid source warehouse is required" });
+      return res
+        .status(400)
+        .json({ message: "Valid source warehouse is required" });
     }
 
-    const sourceWarehouseKey = await resolveProductsWarehouseKey(sourceWarehouse);
+    const sourceWarehouseKey =
+      await resolveProductsWarehouseKey(sourceWarehouse);
 
     if (!rawItems.length) {
-      return res.status(400).json({ message: "At least one product is required" });
+      return res
+        .status(400)
+        .json({ message: "At least one product is required" });
     }
 
     const itemsByProductId = new Map<
@@ -640,7 +636,9 @@ export const loadVehicle = async (req: Request, res: Response) => {
     const rootUpdates: Record<string, any> = {};
     const now = new Date().toLocaleString();
     const transferResults = [];
-    const targetSnapshot = await get(ref(database, `${PRODUCTS_PATH}/${vehicle.name}`));
+    const targetSnapshot = await get(
+      ref(database, `${PRODUCTS_PATH}/${vehicle.name}`),
+    );
     const targetProducts = targetSnapshot.exists()
       ? (targetSnapshot.val() as Record<string, Product>)
       : {};
@@ -648,7 +646,10 @@ export const loadVehicle = async (req: Request, res: Response) => {
     for (const item of items) {
       const { productId, quantity } = item;
 
-      const sourceRef = ref(database, `${PRODUCTS_PATH}/${sourceWarehouseKey}/${productId}`);
+      const sourceRef = ref(
+        database,
+        `${PRODUCTS_PATH}/${sourceWarehouseKey}/${productId}`,
+      );
       const sourceSnapshot = await get(sourceRef);
 
       if (!sourceSnapshot.exists()) {
@@ -670,7 +671,8 @@ export const loadVehicle = async (req: Request, res: Response) => {
         ([, product]) => product.code === sourceProduct.code,
       );
       const targetProductId =
-        targetEntry?.[0] || push(ref(database, `${PRODUCTS_PATH}/${vehicle.name}`)).key;
+        targetEntry?.[0] ||
+        push(ref(database, `${PRODUCTS_PATH}/${vehicle.name}`)).key;
 
       if (!targetProductId) {
         throw new Error("Unable to create vehicle product key");
@@ -751,7 +753,9 @@ export const loadVehicle = async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     console.error("Error loading vehicle:", error);
-    res.status(400).json({ message: error.message || "Failed to load vehicle" });
+    res
+      .status(400)
+      .json({ message: error.message || "Failed to load vehicle" });
   }
 };
 
@@ -771,11 +775,15 @@ export const createMyVehicleSale = async (req: Request, res: Response) => {
     );
 
     if (!selection.vehicles.length) {
-      return res.status(404).json({ message: "No vehicle assigned to this driver" });
+      return res
+        .status(404)
+        .json({ message: "No vehicle assigned to this driver" });
     }
 
     if (!selection.vehicle) {
-      return res.status(403).json({ message: "Vehicle is not assigned to this driver" });
+      return res
+        .status(403)
+        .json({ message: "Vehicle is not assigned to this driver" });
     }
 
     const vehicle = selection.vehicle;
@@ -790,11 +798,15 @@ export const createMyVehicleSale = async (req: Request, res: Response) => {
     }
 
     if (!rawProducts.length) {
-      return res.status(400).json({ message: "At least one product is required" });
+      return res
+        .status(400)
+        .json({ message: "At least one product is required" });
     }
 
     const vehicleProducts = await getProductsForWarehouse(vehicle.name);
-    const productsById = new Map(vehicleProducts.map((product) => [product.id, product]));
+    const productsById = new Map(
+      vehicleProducts.map((product) => [product.id, product]),
+    );
     const products: sell["products"] = rawProducts.map((rawProduct: any) => {
       const productId = String(rawProduct.id || rawProduct.productId || "");
       const stockProduct = productsById.get(productId);
@@ -837,12 +849,8 @@ export const createMyVehicleSale = async (req: Request, res: Response) => {
       (sum, product) => sum + product.qty * product.sellPrice,
       0,
     );
-    const {
-      discount,
-      discountPercent,
-      discountPercentUSD,
-      discountAmountUSD,
-    } = calculateDiscount(rawSell, subtotal);
+    const { discount, discountPercent, discountPercentUSD, discountAmountUSD } =
+      calculateDiscount(rawSell, subtotal);
     const totalPrice = Number((subtotal - discount).toFixed(3));
     const paymentStatus = ["cash", "part", "debt"].includes(
       String(rawSell.paymentStatus),
@@ -850,16 +858,17 @@ export const createMyVehicleSale = async (req: Request, res: Response) => {
       ? (rawSell.paymentStatus as sell["paymentStatus"])
       : "cash";
     const currency = String(rawSell.currency || "USD");
-    const exchangeRate = currency === "USD" ? 1 : toNumber(rawSell.exchangeRate);
+    const exchangeRate =
+      currency === "USD" ? 1 : toNumber(rawSell.exchangeRate);
     const partValue = toNumber(rawSell.partValue);
     const paidAmount =
       paymentStatus === "cash"
         ? totalPrice
         : paymentStatus === "part"
-        ? currency === "USD"
-          ? partValue
-          : Number((partValue / exchangeRate).toFixed(3))
-        : 0;
+          ? currency === "USD"
+            ? partValue
+            : Number((partValue / exchangeRate).toFixed(3))
+          : 0;
 
     if (!rawSell.salesAccountId && !vehicle.defaultSalesAccountId) {
       return res.status(400).json({ message: "Sales account is required" });
@@ -878,16 +887,24 @@ export const createMyVehicleSale = async (req: Request, res: Response) => {
       !rawSell.receivableAccountId &&
       !vehicle.defaultReceivableAccountId
     ) {
-      return res.status(400).json({ message: "Receivable account is required" });
+      return res
+        .status(400)
+        .json({ message: "Receivable account is required" });
     }
 
     if (currency !== "USD" && exchangeRate <= 0) {
-      return res.status(400).json({ message: "Exchange rate must be greater than zero" });
+      return res
+        .status(400)
+        .json({ message: "Exchange rate must be greater than zero" });
     }
 
-    if (paymentStatus === "part" && (paidAmount <= 0 || paidAmount >= totalPrice)) {
+    if (
+      paymentStatus === "part" &&
+      (paidAmount <= 0 || paidAmount >= totalPrice)
+    ) {
       return res.status(400).json({
-        message: "Partial payment must be greater than zero and less than invoice total",
+        message:
+          "Partial payment must be greater than zero and less than invoice total",
       });
     }
 
@@ -934,6 +951,8 @@ export const createMyVehicleSale = async (req: Request, res: Response) => {
     res.json({ message: "Vehicle sale created", data: result });
   } catch (error: any) {
     console.error("Error creating vehicle sale:", error);
-    res.status(400).json({ message: error.message || "Failed to create vehicle sale" });
+    res
+      .status(400)
+      .json({ message: error.message || "Failed to create vehicle sale" });
   }
 };

@@ -49,7 +49,7 @@ export const getAllSells = async (_req: Request, res: Response) => {
 export const createSell = async (req: Request, res: Response) => {
   try {
     const id = uuidv4();
-    const NowDate = new Date().toLocaleString();
+    const NowDate = new Date().toISOString();
 
     const newSell: sell = {
       ...req.body,
@@ -89,7 +89,7 @@ export const deleteSell = async (req: Request, res: Response) => {
 export const createSellInternal = async (newSell: sell): Promise<sell> => {
   try {
     const id = uuidv4();
-    const NowDate = new Date().toLocaleString();
+    const NowDate = new Date().toISOString();
 
     const sellData: sell = stripUndefined({
       ...newSell,
@@ -246,7 +246,6 @@ export const updateSellById = async (req: Request, res: Response) => {
 
     const customer = customerSnap.val();
     const currentBalance = Number(customer.balance || 0);
-    console.log(currentBalance, oldTotalPrice, newTotalPrice);
     const newBalance = currentBalance + (oldTotalPrice - newTotalPrice);
 
     await update(customerRef, {

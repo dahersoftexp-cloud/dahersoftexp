@@ -2,6 +2,11 @@ export interface InventoryUser {
   id?: string;
   username: string;
   password?: string;
+  passwordHash?: string;
+  identityId?: string;
+  sessionVersion?: string;
+  tenantId?: string;
+  status?: string;
   role: string;
   permissions?: string[];
   vehicleId?: string;
@@ -13,6 +18,7 @@ export interface InventoryUser {
 export interface InventoryUserResponse {
   id: string;
   username: string;
+  status?: string;
   role: string;
   permissions: string[];
   vehicleId?: string;

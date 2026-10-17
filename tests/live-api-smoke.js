@@ -1,8 +1,7 @@
 const assert = require("node:assert/strict");
+const { getSmokeTarget, assertIsolatedLogin } = require("../scripts/lib/smoke-safety.cjs");
 
-const BASE_URL = (process.env.API_BASE_URL || "https://dahersoftexp.onrender.com").replace(/\/+$/, "");
-const RUN_ID = process.env.SMOKE_RUN_ID || Date.now().toString(36);
-const TENANT_ID = process.env.SMOKE_TENANT_ID || `qa-smoke-${RUN_ID}`;
+const { baseUrl: BASE_URL, runId: RUN_ID, tenantId: TENANT_ID } = getSmokeTarget();
 const PASSWORD = process.env.SMOKE_PASSWORD || "123123";
 
 const results = [];
@@ -44,13 +43,10 @@ function mark(name, status, details = {}) {
 
 function summarizePayload(payload) {
   if (payload === null || payload === undefined) return payload;
-  if (Array.isArray(payload)) return { type: "array", count: payload.length, first: payload[0] };
+  if (Array.isArray(payload)) return { type: "array", count: payload.length };
   if (typeof payload === "object") {
     const keys = Object.keys(payload);
-    return { type: "object", keys: keys.slice(0, 12), sample: keys.slice(0, 5).reduce((out, key) => {
-      out[key] = payload[key];
-      return out;
-    }, {}) };
+    return { type: "object", keys: keys.slice(0, 12) };
   }
   return payload;
 }
@@ -63,6 +59,7 @@ async function request(method, path, body, options = {}) {
   };
   const response = await fetch(`${BASE_URL}${path}`, {
     method,
+    redirect: "error",
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
   });
@@ -190,7 +187,9 @@ async function main() {
     },
   });
 
-  state.token = loginResponse.data?.token || "";
+  // expect() records failures and continues; tenant validation must stop writes.
+  assertIsolatedLogin(loginResponse, TENANT_ID);
+  state.token = loginResponse.data.token;
   state.headers = {
     Authorization: `Bearer ${state.token}`,
     "X-Inventory-Tenant-Id": encodeURIComponent(TENANT_ID),

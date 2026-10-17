@@ -1,0 +1,12 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "tenant-fixtures": {
+      "$tenantId": {
+        ".read": "$tenantId.matches(/^qa-warehouse-[a-z0-9_-]+$/)",
+        ".write": "$tenantId.matches(/^qa-warehouse-[a-z0-9_-]+$/)"
+      }
+    }
+  }
+}

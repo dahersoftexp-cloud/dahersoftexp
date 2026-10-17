@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from "uuid";
 import { Supplier } from "../types/supplier";
 import { Request, Response } from "express";
+import { canReadFull, listView, pickFields, supplierLookupFields } from "../auth/resourceViews";
 import { purchase } from "../types/purchase";
 import { Payment } from "../types/payment";
 import { ref, get, set, update, remove } from "../utils/tenantFirebase";
@@ -9,11 +10,11 @@ import { Customer } from "../types/customer";
 import { normalizeCurrency, toMoneyNumber } from "../utils/money";
 
 // ✅ جلب جميع الموردين
-export const getAll = async (_req: Request, res: Response) => {
+export const getAll = async (req: Request, res: Response) => {
   try {
     const snapshot = await get(ref(database, "supplier"));
     const suppliers = snapshot.exists() ? Object.values(snapshot.val()) : [];
-    res.json(suppliers);
+    res.json(listView(req, "suppliers.read", suppliers, supplierLookupFields));
   } catch (error) {
     console.error("❌ خطأ في جلب الموردين:", error);
     res.status(500).json({ message: "حدث خطأ أثناء جلب الموردين" });
@@ -24,7 +25,10 @@ export const getAll = async (_req: Request, res: Response) => {
 export const create = async (req: Request, res: Response) => {
   try {
     const now = new Date().toLocaleString();
-    const newSupplier: Supplier = req.body;
+    const newSupplier = canReadFull(req, "suppliers.read") ? req.body : {
+      ...pickFields(req.body, supplierLookupFields.filter((field) => field !== "id")),
+      balance: 0, balanceUSD: 0, balanceSYP: 0, purchases: [],
+    };
     const id = uuidv4();
 
     const SupplierToAdd: Supplier = {
@@ -98,9 +102,6 @@ export const updateSupplierInternal = async (
   sellUpdates?: purchase,
   paymentUpdates?: Payment
 ): Promise<Supplier | null> => {
-
-  console.log(id, sellUpdates, paymentUpdates);
-
   const supplierId = typeof id === "string" ? id : (id as any).id;
   if (!supplierId) throw new Error("Invalid supplier id");
   const supplierRef = ref(database, `supplier/${supplierId}`);
